@@ -34,7 +34,6 @@ import subprocess
 
 import listener
 from univention.config_registry import ConfigRegistry
-import univention.debug as ud
 
 ucr = ConfigRegistry()
 ucr.load()
@@ -47,18 +46,7 @@ attributes = []
 
 def handler(dn, new, old):
 	listener.setuid(0)
-	ud.debug(ud.LISTENER, ud.INFO, 'portal server handler has fired!')
 	try:
-		with open('/var/cache/univention-portal/refresh_portal', 'w'):
-			pass
-		ud.debug(ud.LISTENER, ud.INFO, 'refresh_portal file was created.')
-	finally:
-		listener.unsetuid()
-
-
-def postrun():
-	listener.setuid(0)
-	try:
-		subprocess.call(['service', 'univention-portal-server', 'reload'])
+		subprocess.call(['/usr/sbin/univention-portal', 'update', '--portal'])
 	finally:
 		listener.unsetuid()
