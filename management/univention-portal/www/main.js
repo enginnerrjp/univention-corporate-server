@@ -76,7 +76,7 @@ define([
 	"./PortalEntryWizard",
 	"./tools",
 	"umc/i18n/tools",
-	"umc/json!./portal.json", // -> contains entries of this portal as specified in the LDAP directory
+	"umc/json!./portal/portal.json", // -> contains entries of this portal as specified in the LDAP directory
 	"umc/json!./apps.json", // -> contains all locally installed apps
 	"umc/i18n!portal"
 ], function(declare, lang, array, win, Deferred, aspect, when, on, topic, ioQuery, dojoQuery, dom, domClass, domAttr, domGeometry, domStyle, domConstruct, mouse, Source, all, sprintf, Standby, dijitFocus, a11y, registry, Dialog, Tooltip, DropDownMenu, MenuItem, DropDownButton, tools, render, store, json, dialog, Button, Form, ContainerWidget, ConfirmDialog, CookieBanner, StandbyMixin, MultiInput, put, purify, login, Portal, PortalEntryWizard, portalTools, i18nTools, portalJson, installedApps, _) {
@@ -536,6 +536,252 @@ define([
 					});
 				}));
 			}));
+		},
+
+		_selectIframe: function(id) {
+			domClass.remove(dom.byId('iframes'), 'dijitDisplayNone');
+			tools.values(this._iframeMap).forEach(function(v) {
+				domClass.add(v.iframeWrapper, 'dijitDisplayNone');
+				domClass.remove(v.tab, 'sidebar__tab--selected');
+			});
+			domClass.remove(this._iframeMap[id].iframeWrapper, 'dijitDisplayNone');
+			domClass.add(this._iframeMap[id].tab, 'sidebar__tab--selected');
+
+			domClass.replace(dom.byId('portal'), 'iframeOpen', 'iframeNotOpen');
+			domClass.remove(dom.byId('sidebar__homeTab'), 'sidebar__tab--selected');
+
+			this._selectedIframe = id;
+		},
+
+		_selectHome: function() {
+			domClass.add(dom.byId('iframes'), 'dijitDisplayNone');
+			tools.values(this._iframeMap).forEach(function(v) {
+				domClass.remove(v.tab, 'sidebar__tab--selected');
+			});
+
+			domClass.replace(dojo.body(), 'iframeNotOpen', 'iframeOpen');
+			domClass.add(dom.byId('sidebar__homeTab'), 'sidebar__tab--selected');
+
+			this._selectedIframe = null;
+		},
+
+		__createIframe: function(id, title, logoUrl, url) {
+			var iframeWrapper = put('div.iframeWrapper');
+			var iframeStatus = put('span.iframeStatus.loadingSpinner.loadingSpinner--visible');
+			var iframe = put('iframe[src=$]', url);
+			var tab = put('div.sidebar__tab');
+			var tabSelect = put('div.sidebar__tab__select div.sidebar__tab__select__icon.$ <', portalTools.getIconClass(logoUrl));
+			var tabClose = put('div.sidebar__tab__close div.umcCrossIconWhite <');
+			var titleWrapper = null;
+			if (title) {
+				var titleNode = put('div.sidebar__tab__title $', title);
+				titleWrapper = put('div.sidebar__tab__titleWrapper', titleNode, '+ div.sidebar__tab__titleHover <');
+
+				// resize title
+				put(titleWrapper, '.dijitOffScreen');
+				put(dom.byId('sidebar'), titleWrapper);
+				var maxHeight = domGeometry.getContentBox(titleWrapper).h;
+				var pos = domGeometry.position(titleNode);
+				if (pos.h > maxHeight) {
+					put(titleNode, '.sidebar__tab__title--small');
+					pos = domGeometry.position(titleNode);
+					if (pos.h > maxHeight) {
+						titleWrapper.setAttribute('title', titleNode.textContent);
+						while (titleNode.textContent.length > 3 && pos.h > maxHeight) {
+							titleNode.textContent = titleNode.textContent.slice(0, Math.max(0, titleNode.textContent.length - 6)) + '...';
+							pos = domGeometry.position(titleNode);
+						}
+					}
+				}
+				put(titleWrapper, '!dijitOffScreen');
+			}
+			var hoverWrapper = null;
+			if (titleWrapper) {
+				hoverWrapper = put('div.sidebar__tab__hoverWrapper', tabClose, '+', titleWrapper, '<');
+			} else {
+				hoverWrapper = put('div.sidebar__tab__hoverWrapper', tabClose, '<');
+			}
+			put(tab, tabSelect, '+', hoverWrapper);
+
+			// you can't open iframes with src http (no 's')
+			// when the origin is https.
+			// This is a 'Mixed Content' error and it can't be catched
+			// (as far as i know).
+			// So we say that an iframe failed when onload does not fire
+			// after 4 seconds.
+			var maybeLoadFailed = setTimeout(function() {
+				iframeStatus.innerHTML = _('Content could not be loaded.');
+				put(iframeStatus, '!dijitDisplayNone!loadingSpinner!loadingSpinner--visible');
+			}, 4000);
+			iframe.addEventListener('load', lang.hitch(this, function() {
+				put(iframeStatus, '.dijitDisplayNone!loadingSpinner!loadingSpinner--visible');
+				clearTimeout(maybeLoadFailed);
+
+				// try to get the pathname of the iframe location.
+				// This will not always work if the portal and iframe are not of same origin
+				var pathname = lang.getObject('contentWindow.location.pathname', false, iframe);
+				if (pathname === '/univention/portal' || pathname === '/univention/portal/') {
+					this._removeIframe(id);
+				}
+
+				try {
+					iframe.contentWindow.addEventListener('beforeunload', function() {
+						iframeStatus.innerHTML = '';
+						put(iframeStatus, '!dijitDisplayNone.loadingSpinner.loadingSpinner--visible');
+					});
+				} catch(e) {}
+			}));
+			iframe.addEventListener('error', lang.hitch(this, function() {
+				iframeStatus.innerHTML = _('Content could not be loaded.');
+				put(iframeStatus, '!dijitDisplayNone!loadingSpinner!loadingSpinner--visible');
+			}));
+			put(iframeWrapper, iframeStatus, '+', iframe);
+			return {
+				iframe: iframe,
+				iframeWrapper: iframeWrapper,
+				tab: tab,
+				tabSelect: tabSelect,
+				tabClose: tabClose,
+				tabTitle: titleWrapper
+			};
+		},
+
+		_createIframe: function(id, title, logoUrl, url) {
+			var d = this.__createIframe(id, title, logoUrl, url);
+			on(d.tabSelect, 'click', lang.hitch(this, function() {
+				this._selectIframe(id);
+			}));
+			on(d.tabClose, 'click', lang.hitch(this, function() {
+				this._removeIframe(id);
+			}));
+			if (d.tabTitle) {
+				on(d.tabTitle, 'click', lang.hitch(this, function() {
+					this._selectIframe(id);
+				}));
+			}
+			this._iframeMap[id] = {
+				iframeWrapper: d.iframeWrapper,
+				tab: d.tab
+			};
+			put(dom.byId('iframes'), d.iframeWrapper);
+			put(dom.byId('sidebar__tabs'), d.tab);
+		},
+
+		openIframe: function(id, title, logoUrl, url) {
+			if (!this._iframeMap[id]) {
+				this._createIframe(id, title, logoUrl, url);
+			}
+			this._selectIframe(id);
+		},
+
+		showLoginInIframe: function(saml) {
+			if (!this._iframeMap.$__login__$) {
+				var target = saml ? '/univention/saml/' : '/univention/login/';
+				var url = target + '?' + ioQuery.objectToQuery({
+					'location': '/univention/portal/loggedin/',
+					username: tools.status('username'),
+					lang: i18nTools.defaultLang()
+				});
+				url = portalJson.login_url;
+
+				var d = this.__createIframe(null, null, null, url);
+				d.tab = registry.byId('sidebar__loginAndUserMenuButton')._loginButton.domNode;
+				this._iframeMap.$__login__$ = d;
+				
+				d.iframe.addEventListener('load', lang.hitch(this, function() {
+					var pathname = lang.getObject('contentWindow.location.pathname', false, d.iframe);
+					if (pathname === '/univention/portal/loggedin/') {
+						login.start(null, null, true).then(lang.hitch(this, function() {
+							this._setupEditModeIfAuthorized();
+							this._refresh(portalTools.RenderMode.NORMAL).then(lang.hitch(this, function() {
+								this._addLinks();
+							}));
+						}));
+						this._selectHome();
+						this._removeIframe('$__login__$');
+					}
+				}));
+				put(dom.byId('iframes'), d.iframeWrapper);
+			}
+			this._selectIframe('$__login__$');
+		},
+
+
+		_removeIframe: function(id) {
+			// TODO research
+			// we are just removing the iframe from the dom.
+			// Do we have to do something else.
+			var o = this._iframeMap[id];
+			if (!o) {
+				return;
+			}
+			if (o.tab && id !== '$__login__$') {
+				if (o.tab.parentNode) {
+					o.tab.parentNode.removeChild(o.tab);
+				}
+			}
+			if (o.iframeWrapper) {
+				if (o.iframeWrapper.parentNode) {
+					o.iframeWrapper.parentNode.removeChild(o.iframeWrapper);
+				}
+			}
+			delete this._iframeMap[id];
+
+			if (id === this._selectedIframe) {
+				this._selectHome();
+			}
+			// TODO do we want to select the home when closing an iframe or rather something like "the iframe below/above"
+		},
+
+		openFolder: function(dn) {
+			var renderMode = portalTools.RenderMode.NORMAL;
+
+			if (this._openFolders.length > 0) {
+				var prevFolder = this._openFolders[this._openFolders.length - 1];
+				domClass.add(prevFolder.domNode, 'dijitDisplayNone');
+			}
+
+			var folder = portalJson.folders[dn];
+			folder = {
+				$notInPortalJSON$: false,
+				heading: folder.name[locale] || folder.name.en_US,
+				entries: this._getEntries(folder.entries, renderMode),
+				dn: dn,
+				renderMode: renderMode
+			};
+			var c = new ContainerWidget({
+				'class': 'folderContainer'
+			});
+			var closeButton = new Button({
+				label: 'close',
+				callback: lang.hitch(this, function() {
+					this.closeFolder();
+				})
+			});
+			var portalCategory = this._renderCategory(folder, renderMode);
+			c.addChild(portalCategory);
+			c.addChild(closeButton);
+			this._openFolders.push(c);
+
+			var folderNode = dom.byId('folders');
+			domClass.remove(folderNode, 'dijitDisplayNone');
+			folderNode.appendChild(c.domNode);
+			c.startup();
+		},
+
+		closeFolder: function() {
+			if (this._openFolders.length === 0) {
+				return;
+			}
+			var folder = this._openFolders.pop();
+			folder.destroyRecursive();
+			if (this._openFolders.length === 0) {
+				var folderNode = dom.byId('folders');
+				domClass.add(folderNode, 'dijitDisplayNone');
+			} else {
+				var prevFolder = this._openFolders[this._openFolders.length - 1];
+				domClass.remove(prevFolder.domNode, 'dijitDisplayNone');
+			}
 		},
 
 		_renderCategory: function(category, renderMode) {
