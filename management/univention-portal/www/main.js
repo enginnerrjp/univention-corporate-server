@@ -1690,10 +1690,36 @@ define([
 				if (link.locale != locale) {
 					return;
 				}
-				var name = link.name;
-				var a = put(dom.byId('portal-footer'), 'a', name);
-				a.href = link.href;
-			});
+				var linkPrio = 0;
+				if (links[x] && links[x].$priority) {
+					linkPrio = links[x].$priority;
+				}
+				topic.publish("/portal/menu", menu, "addItem", {
+					onClick: lang.hitch(link, function() {
+						var linkTarget = this.linkTarget;
+						if (linkTarget == "useportaldefault") {
+							linkTarget = portalJson.portal.defaultLinkTarget;
+						}
+						switch (linkTarget) {
+							case 'samewindow':
+								window.location = this.web_interface;
+								break;
+							case 'newwindow':
+								window.open(this.web_interface);
+								break;
+							case 'embedded':
+								topic.publish('/portal/iframes/open', this.id, this.name, this.logo_name, this.web_interface);
+								break;
+						}
+					}),
+					title: link.description,
+					label: link.name,
+					$id: link.dn, // use link.dn instead of link.id. link.dn does not change across multiple
+					// __addLinks calls (which calls _prepareEntriesForPortalGallery) which is what we want
+					// so that we don't get multiple, duplicate menu entries
+					$priority: basePrio + linkPrio
+				});
+			}
 		},
 
 		saveEntryOrder: function() {
