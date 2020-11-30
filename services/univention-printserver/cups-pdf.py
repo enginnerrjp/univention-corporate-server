@@ -31,6 +31,8 @@
 # <https://www.gnu.org/licenses/>.
 
 from __future__ import absolute_import
+
+from listener import AsUser
 import listener
 import univention.debug as ud
 import univention.config_registry
@@ -58,8 +60,5 @@ def handler(dn, new, old):
 				list_ = []
 				list_.append('cups/cups-pdf/directory=%s' % (path,))
 				list_.append('cups/cups-pdf/anonymous=%s' % (path,))
-				listener.setuid(0)
-				try:
+				with AsUser(0):
 					univention.config_registry.handler_set(list_)
-				finally:
-					listener.unsetuid()
