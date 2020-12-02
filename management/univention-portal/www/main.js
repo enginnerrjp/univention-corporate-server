@@ -104,11 +104,7 @@ define([
 	var _PortalPropertiesDialog = declare('PortalPropertiesDialog', [ConfirmDialog, StandbyMixin]);
 	var _WizardDialog = declare('WizardDialog', [Dialog, StandbyMixin]);
 
-<<<<<<< HEAD
-	// var locale = i18nTools.defaultLang().replace(/-/, '_');
-=======
 	var locale = i18nTools.defaultLang().replace(/-/, '_');
->>>>>>> bdac994808... Bug #52345: do not fetch portal.json multiple times
 
 	var _portalLoadDeferred = null;
 
@@ -1269,12 +1265,16 @@ define([
 
 		_checkEditAuthorization: function() {
 			var deferred = new Deferred();
-			tools.umcpCommand('get/modules').then(function(result) {
-				var isAuthorized = result.modules.some(function(module) {
-					return module.flavor === 'settings/portal_all';
+			if (portalJson.may_edit_portal) {
+				tools.umcpCommand('get/modules').then(function(result) {
+					var isAuthorized = result.modules.some(function(module) {
+						return module.flavor === 'portals/all';
+					});
+					deferred.resolve(isAuthorized);
 				});
-				deferred.resolve(isAuthorized);
-			});
+			} else {
+				deferred.resolve(false);
+			}
 			return deferred;
 		},
 
