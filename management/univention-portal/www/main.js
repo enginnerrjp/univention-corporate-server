@@ -104,7 +104,11 @@ define([
 	var _PortalPropertiesDialog = declare('PortalPropertiesDialog', [ConfirmDialog, StandbyMixin]);
 	var _WizardDialog = declare('WizardDialog', [Dialog, StandbyMixin]);
 
+<<<<<<< HEAD
 	// var locale = i18nTools.defaultLang().replace(/-/, '_');
+=======
+	var locale = i18nTools.defaultLang().replace(/-/, '_');
+>>>>>>> bdac994808... Bug #52345: do not fetch portal.json multiple times
 
 	var _portalLoadDeferred = null;
 
@@ -1742,11 +1746,8 @@ define([
 			}
 
 			this._standby.show();
-			this._moduleStore.put({
-				'$dn$': portalJson.portal.dn,
-				content: newContent
-			}).then(lang.hitch(this, function(result) {
-				if (result.success) {
+			all(changes).then(lang.hitch(this, function(result) {
+				if (result.every(res => res.success)) {
 					this._refresh(portalTools.RenderMode.EDIT, true).then(lang.hitch(this, function() {
 						this._standby.hide();
 						dialog.contextNotify(_('Changes saved'));
