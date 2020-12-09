@@ -37,7 +37,6 @@ from types import TracebackType
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 configRegistry: ConfigRegistry
-baseConfig: configRegistry
 
 
 def setuid(uid: Union[str, int]) -> None:
