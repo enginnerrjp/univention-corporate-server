@@ -32,7 +32,7 @@ from __future__ import absolute_import
 
 import subprocess
 
-import listener
+from listener import AsUser
 import univention.debug as ud
 
 name = 'portal_server'
@@ -41,22 +41,16 @@ filter = '(|(univentionObjectType=portals/portal)(univentionObjectType=portals/c
 attributes = []
 
 
+@AsUser(0)
 def handler(dn, new, old):
 	# type: (str, dict, dict) -> None
-	listener.setuid(0)
 	ud.debug(ud.LISTENER, ud.INFO, 'portal server handler has fired!')
-	try:
-		with open('/var/cache/univention-portal/refresh_portal', 'w'):
-			pass
-		ud.debug(ud.LISTENER, ud.INFO, 'refresh_portal file was created.')
-	finally:
-		listener.unsetuid()
+	with open('/var/cache/univention-portal/refresh_portal', 'w'):
+		pass
+	ud.debug(ud.LISTENER, ud.INFO, 'refresh_portal file was created.')
 
 
+@AsUser(0)
 def postrun():
 	# type: () -> None
-	listener.setuid(0)
-	try:
-		subprocess.call(['service', 'univention-portal-server', 'reload'])
-	finally:
-		listener.unsetuid()
+	subprocess.call(['service', 'univention-portal-server', 'reload'])
