@@ -32,14 +32,13 @@
 
 from __future__ import absolute_import
 
-from listener import AsUser
-import listener
+from listener import configRegistry, AsUser
 import os
 import pwd
 import univention.debug as ud
 from subprocess import call
 
-server_role = listener.configRegistry['server/role']
+server_role = configRegistry['server/role']
 
 
 name = 'keytab-member'

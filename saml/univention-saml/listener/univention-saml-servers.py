@@ -32,12 +32,11 @@
 
 from __future__ import absolute_import
 
-from listener import AsUser
-import listener
+from listener import AsUser, configRegistry as ucr
 import subprocess
 import os.path
 
-from univention.config_registry import ConfigRegistry, handler_set, handler_unset
+from univention.config_registry import handler_set, handler_unset
 
 name = 'univention-saml-servers'
 description = 'Manage ucs/server/saml-idp-server/* variables'
@@ -47,7 +46,6 @@ attributes = ['univentionService']
 
 def handler(dn, new, old):
 	# type: (str, dict, dict) -> None
-	ucr = ConfigRegistry()
 	ucr.load()
 	with AsUser(0):
 		try:
