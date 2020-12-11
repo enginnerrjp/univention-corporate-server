@@ -91,6 +91,7 @@ RE_CREDENTIALS = re.compile(r'^repository/credentials/(?:(?P<realm>[^/]+)/)?(?P<
 
 MIN_GZIP = 100  # size of non-empty gzip file
 UUID_NULL = '00000000-0000-0000-0000-000000000000'
+FN_APTSOURCES_COMPONENT = '/etc/apt/sources.list.d/20_ucs-online-component.list'
 
 
 def verify_script(script, signature):
@@ -823,17 +824,321 @@ class UCSLocalServer(_UCSServer):
         raise DownloadError(uri, -1)
 
 
+class Component(object):
+    UCRV = "repository/online/component/{}/{}"
+    AVAILABLE = 'available'
+    NOT_FOUND = 'not_found'
+    DISABLED = 'disabled'
+    UNKNOWN = 'unknown'
+    PERMISSION_DENIED = 'permission_denied'
+
+    def __init__(self, updater, name):
+        # type: (UniventionUpdater, str) -> None
+        self.updater = updater
+        self.name = name
+
+    def ucrv(self, key=""):
+        # type: (str) -> str
+        return "/".join(filter(None, ("repository", "online", "component", self.name, key)))
+
+    def __getitem__(self, key):
+        # type: (str) -> str
+        return self.updater.configRegistry.get(self.ucrv(key)) or ""
+
+    def __bool__(self):
+        # type: () -> bool
+        return self.updater.configRegistry.is_true(self.ucrv())
+
+    __nonzero__ = __bool__
+
+    def versions(self, start=None, end=None):
+        # type: (Optional[UCS_Version], Optional[UCS_Version]) -> Set[UCS_Version]
+        version = self["version"]
+        versions = RE_SPLIT_MULTI.split(version)
+        candidates = {
+            self.updater.current_version if version in ("current", "") else UCS_Version(version if '-' in version else '%s-0' % version)
+            for version in versions
+        }
+        return {
+            candidate
+            for candidate in candidates
+            if (start is None or start.mm <= candidate.mm) and (end is None or candidate.mm <= end.mm)
+        }
+
+    @property
+    def current(self):
+        # type: () -> bool
+        version = self["version"]
+        versions = RE_SPLIT_MULTI.split(version)
+        return any((
+            version in {"current"}
+            for version in versions
+        ))
+
+    @property
+    def default_packages(self):
+        # type: () -> Set[str]
+        """
+        Returns a set of (meta) package names to be installed for this component.
+
+        :returns: a set of package names.
+        """
+        return set((
+            pkg
+            for var in ('defaultpackages', 'defaultpackage')
+            for pkg in RE_SPLIT_MULTI.split(self[var])
+        )) - {""}
+
+    def defaultpackage_installed(self, ignore_invalid_package_names=True):
+        # type: (bool) -> Optional[bool]
+        """
+        Returns installation status of component's default packages
+
+        :param bool ignore_invalid_package_names: Ignore invalid package names.
+        :returns: On of the values:
+
+            None
+                no default packages are defined
+            True
+                all default packages are installed
+            False
+                at least one package is not installed
+
+        :rtype: None or bool
+        :raises ValueError: if UCR variable contains invalid package names if ignore_invalid_package_names=False
+        """
+        pkglist = self.default_packages
+        if not pkglist:
+            return None
+
+        # check package names
+        for pkg in pkglist:
+            match = RE_ALLOWED_DEBIAN_PKGNAMES.search(pkg)
+            if not match:
+                if ignore_invalid_package_names:
+                    continue
+                raise ValueError('invalid package name (%s)' % pkg)
+
+        cmd = ['/usr/bin/dpkg-query', '-W', '-f', '${Status}\\n']
+        cmd.extend(pkglist)
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = (data.decode("UTF-8", errors="replace") for data in p.communicate())
+        # count number of "Status: install ok installed" lines
+        installed_correctly = [x for x in stdout.splitlines() if x.endswith(' ok installed')]
+        # if pkg count and number of counted lines match, all packages are installed
+        return len(pkglist) == len(installed_correctly)
+
+    def baseurl(self, for_mirror_list=False):
+        # type: (bool) -> UcsRepoUrl
+        """
+        Calculate the base URL for a component.
+
+        :param bool for_mirror_list: Use external or local repository.
+
+        CS (component server)
+            value of `repository/online/component/%s/server`
+        MS (mirror server)
+            value of `repository/mirror/server`
+        RS (repository server)
+            value of `repository/online/server`
+        \-
+            value is unset or no entry
+        /blank/
+            value is irrelevant
+
+        +-------------+----------+------------+---------+------------+------------+-------------+
+        | UCR configuration                             |Result                   |             |
+        +-------------+----------+------------+---------+------------+------------+             |
+        | isRepoServer|enabled   |localmirror |server   |sources.list mirror.list |             |
+        +=============+==========+============+=========+============+============+=============+
+        | False       |False     |False       |\-       |\-          |\-          |no           |
+        +             +----------+------------+---------+------------+------------+local        |
+        |             |True      |            |\-       |RS          |\-          |repository   |
+        +             +----------+------------+---------+------------+------------+mirror       |
+        |             |True      |            |CS       |CS          |\-          |             |
+        +-------------+----------+------------+---------+------------+------------+-------------+
+        | True        |False     |False       |         |\-          |\-          |local        |
+        +             +----------+------------+---------+------------+------------+repository   |
+        |             |False     |True        |\-       |\-          |MS          |mirror       |
+        +             +----------+------------+---------+------------+------------+             |
+        |             |False     |True        |CS       |\-          |CS          |             |
+        +             +----------+------------+---------+------------+------------+             |
+        |             |True      |False       |\-       |MS          |\-          |             |
+        +             +----------+------------+---------+------------+------------+             |
+        |             |True      |False       |CS       |CS          |\-          |             |
+        +             +----------+------------+---------+------------+------------+             |
+        |             |True      |True        |\-       |RS          |MS          |             |
+        +             +----------+------------+---------+------------+------------+             |
+        |             |True      |True        |CS       |RS          |CS          |             |
+        +             +----------+------------+---------+------------+------------+-------------+
+        |             |False     |\-          |\-       |\-          |\-          |backward     |
+        +             +----------+            +---------+------------+------------+compabibility|
+        |             |True      |            |\-       |RS          |MS          |[1]_         |
+        +             +----------+            +---------+------------+------------+             |
+        |             |True      |            |CS       |RS          |CS          |             |
+        +-------------+----------+------------+---------+------------+------------+-------------+
+
+        .. [1] if `repository/online/component/%s/localmirror` is unset, then the value of `repository/online/component/%s` will be used to achieve backward compatibility.
+        """
+
+        c_prefix = self.ucrv()
+        if self.updater.is_repository_server:
+            m_url = UcsRepoUrl(self.updater.configRegistry, 'repository/mirror')
+            c_enabled = bool(self)
+            c_localmirror = self.updater.configRegistry.is_true(self.ucrv("localmirror"), c_enabled)
+
+            if for_mirror_list:  # mirror.list
+                if c_localmirror:
+                    return UcsRepoUrl(self.updater.configRegistry, c_prefix, m_url)
+            else:  # sources.list
+                if c_enabled:
+                    if c_localmirror:
+                        return self.updater.repourl
+                    else:
+                        return UcsRepoUrl(self.updater.configRegistry, c_prefix, m_url)
+        else:
+            return UcsRepoUrl(self.updater.configRegistry, c_prefix, self.updater.repourl)
+
+        raise CannotResolveComponentServerError(self.name, for_mirror_list)
+
+    def server(self, for_mirror_list=False):
+        # type: (bool) -> UCSHttpServer
+        """
+        Return :py:class:`UCSHttpServer` for component as configures via UCR.
+
+        :param bool for_mirror_list: component entries for `mirror.list` will be returned, otherwise component entries for local `sources.list`.
+        :returns: The repository server for the component.
+        :rtype: UCSHttpServer
+        :raises ConfigurationError: if the configured server is not usable.
+        """
+        c_url = copy.copy(self.baseurl(for_mirror_list))
+        c_url.path = ''
+        prefix = self["prefix"]
+
+        user_agent = self.updater._get_user_agent_string()
+
+        server = UCSHttpServer(
+            baseurl=c_url,
+            user_agent=user_agent,
+            timeout=self.updater.timeout,
+        )
+        try:
+            # if prefix.lower() == 'none' ==> use no prefix
+            if prefix and prefix.lower() == 'none':
+                try:
+                    assert server.access(None, '')
+                except DownloadError as e:
+                    uri, code = e.args
+                    raise ConfigurationError(uri, 'absent prefix forced - component %s not found: %s' % (self.name, uri))
+            else:
+                # FIXME: PMH stop iterating
+                for testserver in [
+                    server + '/univention-repository/',
+                    server + self.updater.repourl.path if self.updater.repourl.path else None,
+                    server,
+                ]:
+                    if not testserver:
+                        continue
+                    if prefix:  # append prefix if defined
+                        testserver = testserver + '%s/' % (prefix.strip('/'),)
+                    try:
+                        assert testserver.access(None, '')
+                        return testserver
+                    except DownloadError as e:
+                        ud.debug(ud.NETWORK, ud.ALL, "%s" % e)
+                        uri, code = e.args
+                raise ConfigurationError(uri, 'non-existing component prefix: %s' % (uri,))
+
+        except ConfigurationError:
+            if self.updater.check_access:
+                raise
+        return server
+
+    def repositories(self, versions, clean=False, for_mirror_list=False):
+        # type: (Iterable[UCS_Version], bool, bool) -> Iterator[str]
+        """
+        Return list of Debian repository statements for requested component.
+
+        :param versions: A list of UCS releases.
+        :param bool clean: Add additional `clean` statements for `apt-mirror`.
+        :param bool for_mirror_list: component entries for `mirror.list` will be returned, otherwise component entries for local `sources.list`.
+        :returns: A list of strings with APT statements.
+        """
+        archs = self.updater.architectures
+        versions_mmp = {UCS_Version((v.major, v.minor, 0)) for v in versions}
+        for version in versions_mmp:
+            # FIXME: PMH stop iterating
+            for server, ver in self.updater._iterate_component_repositories([self.name], version, version, archs, for_mirror_list=for_mirror_list):
+                yield ver.deb(server)
+                if ver.arch == archs[-1]:  # after architectures but before next patch(level)
+                    if clean:
+                        yield ver.clean(server)
+                    if self.updater.sources:
+                        ver.arch = "source"
+                        try:
+                            code, size, content = server.access(ver, "Sources.gz")
+                            yield ver.deb(server, "deb-src")
+                        except DownloadError as e:
+                            ud.debug(ud.NETWORK, ud.ALL, "%s" % e)
+
+    def status(self):
+        # type: () -> str
+        """
+        Returns the current status of specified component based on :file:`/etc/apt/sources.list.d/20_ucs-online-component.list`
+
+        :returns: One of the strings:
+
+            :py:const:`DISABLED`
+                component has been disabled via UCR
+            :py:const:`AVAILABLE`
+                component is enabled and at least one valid repo string has been found in .list file
+            :py:const:`NOT_FOUND`
+                component is enabled but no valid repo string has been found in .list file
+            :py:const:`PERMISSION_DENIED`
+                component is enabled but authentication failed
+            :py:const:`UNKNOWN`
+                component's status is unknown
+
+        :rtype: str
+        """
+        if self.name not in self.updater.get_components():
+            return self.DISABLED
+
+        try:
+            comp_file = open(FN_APTSOURCES_COMPONENT, 'r')
+        except IOError:
+            return self.UNKNOWN
+        rePath = re.compile('(un)?maintained/component/ ?%s/' % self.name)
+        reDenied = re.compile('credentials not accepted: %s$' % self.name)
+        try:
+            # default: file contains no valid repo entry
+            result = self.NOT_FOUND
+            for line in comp_file:
+                if line.startswith('deb ') and rePath.search(line):
+                    # at least one repo has been found
+                    result = self.AVAILABLE
+                elif reDenied.search(line):
+                    # stop immediately if at least one repo has authentication problems
+                    return self.PERMISSION_DENIED
+            # return result
+            return result
+        finally:
+            comp_file.close()
+
+    @property
+    def parts(self):
+        # type: () -> List[str]
+        parts_unique = set(self.updater.parts)
+        if self.updater.configRegistry.is_true(self.ucrv('unmaintained')):
+            parts_unique.add("unmaintained")
+
+        return ['%s/component' % (part,) for part in parts_unique]
+
+
 class UniventionUpdater(object):
     """
     Handle UCS package repositories.
     """
-
-    COMPONENT_AVAILABLE = 'available'
-    COMPONENT_NOT_FOUND = 'not_found'
-    COMPONENT_DISABLED = 'disabled'
-    COMPONENT_UNKNOWN = 'unknown'
-    COMPONENT_PERMISSION_DENIED = 'permission_denied'
-    FN_UPDATER_APTSOURCES_COMPONENT = '/etc/apt/sources.list.d/20_ucs-online-component.list'
 
     def __init__(self, check_access=True):
         # type: (bool) -> None
@@ -999,7 +1304,7 @@ class UniventionUpdater(object):
         failed = set(
             component
             for component in components
-            if not self.get_component_repositories(component, [ver], clean=False, debug=(errorsto == 'stderr'))
+            if not any(self.component(component).repositories([ver]))
         )
         if failed:
                 ex = RequiredComponentError(str(ver), failed)
@@ -1075,20 +1380,24 @@ class UniventionUpdater(object):
 
         result = [UCSRepoPool5(version).deb(self.server)]
         for component in components:
-            repos = []  # type: List[str]
+            comp = self.component(component)
             try:
-                repos = self.get_component_repositories(component, [version], False)
+                repos = list(comp.repositories([version]))
+                if not repos:
+                    server = comp.server()
+                    uri = server.join('%s/component/%s/' % (version, component))
+                    raise ConfigurationError(uri, 'component not found')
+                result += repos
             except (ConfigurationError, ProxyError):
                 # if component is marked as required (UCR variable "version" contains "current")
                 # then raise error, otherwise ignore it
                 if component in current_components:
                     raise
-            if not repos and component in current_components:
-                server = self._get_component_server(component)
-                uri = server.join('%s/component/%s/' % (version, component))
-                raise ConfigurationError(uri, 'component not found')
-            result += repos
         return result
+
+    def component(self, name):
+        # type: (str) -> Component
+        return Component(self, name)
 
     def get_components(self, only_localmirror_enabled=False):
         # type: (bool) -> Set[str]
@@ -1124,15 +1433,11 @@ class UniventionUpdater(object):
         :returns: Set of component names marked as current.
         :rtype: set(str)
         """
-        all_components = self.get_components()
-        components = set()
-        for component in all_components:
-            key = 'repository/online/component/%s/version' % component
-            value = self.configRegistry.get(key, '')
-            versions = RE_SPLIT_MULTI.split(value)
-            if 'current' in versions:
-                components.add(component)
-        return components
+        return {
+            component
+            for component in self.get_components()
+            if self.component(component).current
+        }
 
     def get_all_components(self):
         # type: () -> Set[str]
@@ -1150,109 +1455,6 @@ class UniventionUpdater(object):
                     components.add(component_part)
         return components
 
-    def get_current_component_status(self, name):
-        # type: (str) -> str
-        """
-        Returns the current status of specified component based on `/etc/apt/sources.list.d/20_ucs-online-component.list`
-
-        :param str name: The name of the component.
-        :returns: One of the strings:
-
-            :py:const:`COMPONENT_DISABLED`
-                component has been disabled via UCR
-            :py:const:`COMPONENT_AVAILABLE`
-                component is enabled and at least one valid repo string has been found in .list file
-            :py:const:`COMPONENT_NOT_FOUND`
-                component is enabled but no valid repo string has been found in .list file
-            :py:const:`COMPONENT_PERMISSION_DENIED`
-                component is enabled but authentication failed
-            :py:const:`COMPONENT_UNKNOWN`
-                component's status is unknown
-
-        :rtype: str
-        """
-        if name not in self.get_components():
-            return self.COMPONENT_DISABLED
-
-        try:
-            comp_file = open(self.FN_UPDATER_APTSOURCES_COMPONENT, 'r')
-        except IOError:
-            return self.COMPONENT_UNKNOWN
-        rePath = re.compile('(un)?maintained/component/ ?%s/' % name)
-        reDenied = re.compile('credentials not accepted: %s$' % name)
-        try:
-            # default: file contains no valid repo entry
-            result = self.COMPONENT_NOT_FOUND
-            for line in comp_file:
-                if line.startswith('deb ') and rePath.search(line):
-                    # at least one repo has been found
-                    result = self.COMPONENT_AVAILABLE
-                elif reDenied.search(line):
-                    # stop immediately if at least one repo has authentication problems
-                    return self.COMPONENT_PERMISSION_DENIED
-            # return result
-            return result
-        finally:
-            comp_file.close()
-
-    def get_component_defaultpackage(self, componentname):
-        # type: (str) -> Set[str]
-        """
-        Returns a set of (meta) package names to be installed for this component.
-
-        :param str componentname: The name of the component.
-        :returns: a set of package names.
-        :rtype: set(str)
-        """
-        lst = set()  # type: Set[str]
-        for var in ('defaultpackages', 'defaultpackage'):
-            if componentname and self.configRegistry.get('repository/online/component/%s/%s' % (componentname, var)):
-                val = self.configRegistry.get('repository/online/component/%s/%s' % (componentname, var), '')
-                # split at " " and "," and remove empty items
-                lst |= set(RE_SPLIT_MULTI.split(val))
-        lst.discard('')
-        return lst
-
-    def is_component_defaultpackage_installed(self, componentname, ignore_invalid_package_names=True):
-        # type: (str, bool) -> Optional[bool]
-        """
-        Returns installation status of component's default packages
-
-        :param str componentname: The name of the component.
-        :param bool ignore_invalid_package_names: Ignore invalid package names.
-        :returns: On of the values:
-
-            None
-                no default packages are defined
-            True
-                all default packages are installed
-            False
-                at least one package is not installed
-
-        :rtype: None or bool
-        :raises ValueError: if UCR variable contains invalid package names if ignore_invalid_package_names=False
-        """
-        pkglist = self.get_component_defaultpackage(componentname)
-        if not pkglist:
-            return None
-
-        # check package names
-        for pkg in pkglist:
-            match = RE_ALLOWED_DEBIAN_PKGNAMES.search(pkg)
-            if not match:
-                if ignore_invalid_package_names:
-                    continue
-                raise ValueError('invalid package name (%s)' % pkg)
-
-        cmd = ['/usr/bin/dpkg-query', '-W', '-f', '${Status}\\n']
-        cmd.extend(pkglist)
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = (data.decode("UTF-8", errors="replace") for data in p.communicate())
-        # count number of "Status: install ok installed" lines
-        installed_correctly = len([x for x in stdout.splitlines() if x.endswith(' ok installed')])
-        # if pkg count and number of counted lines match, all packages are installed
-        return len(pkglist) == installed_correctly
-
     def component_update_get_packages(self):
         # type: () -> Tuple[List[Tuple[Text, Text]], List[Tuple[Text, Text, Text]], List[Tuple[Text, Text]]]
         """
@@ -1263,7 +1465,7 @@ class UniventionUpdater(object):
         """
         env = dict(os.environ, LC_ALL="C.UTF-8")
 
-        proc = subprocess.Popen(("univention-config-registry", "commit", "/etc/apt/sources.list.d/20_ucs-online-component.list"), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(("univention-config-registry", "commit", FN_APTSOURCES_COMPONENT), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = (data.decode("UTF-8", errors="replace") for data in proc.communicate())
         if stderr:
             ud.debug(ud.NETWORK, ud.PROCESS, 'stderr=%s' % stderr)
@@ -1447,222 +1649,26 @@ class UniventionUpdater(object):
         self.log.info('Searching components %r [%s..%s)', components, start, end)
         # Components are ... different:
         for component in components:
+            comp = self.component(component)
             # server, port, prefix
-            server = self._get_component_server(component, for_mirror_list=for_mirror_list)
+            server = comp.server(for_mirror_list=for_mirror_list)
             # parts
-            parts_unique = set(self.parts)
-            if self.configRegistry.is_true('repository/online/component/%s/unmaintained' % (component)):
-                parts_unique.add("unmaintained")
-            parts = ['%s/component' % (part,) for part in parts_unique]
+            parts = comp.parts
             # versions
-            versions = {start} if start == end else self._get_component_versions(component, start, end)
+            versions = {start} if start == end else comp.versions(start, end)
 
             self.log.info('Component %s from %s versions %r', component, server, versions)
             for version in versions:
                 try:
+                    # layout = self.configRegistry("re
                     repos = [(UCSRepoPool, archs), (UCSRepoPoolNoArch, [])]  # type: List[Tuple[Type[_UCSRepo], List[str]]]
                     for (UCSRepoPoolVariant, subarchs) in repos:
                         struct = UCSRepoPoolVariant(prefix=server, patch=component)
                         for ver in self._iterate_versions(struct, version, version, parts, ['all'] + subarchs, server):
                             yield server, ver
                 except (ConfigurationError, ProxyError):
-                    # if component is marked as required (UCR variable "version" contains "current")
-                    # then raise error, otherwise ignore it
-                    if component in self.get_current_components():
+                    if comp.current:
                         raise
-
-    def _get_component_baseurl(self, component, for_mirror_list=False):
-        # type: (str, bool) -> UcsRepoUrl
-        """
-        Calculate the base URL for a component.
-
-        :param str component: Name of the component.
-        :param bool for_mirror_list: Use external or local repository.
-
-        CS (component server)
-            value of `repository/online/component/%s/server`
-        MS (mirror server)
-            value of `repository/mirror/server`
-        RS (repository server)
-            value of `repository/online/server`
-        \-
-            value is unset or no entry
-        /blank/
-            value is irrelevant
-
-        +-------------+----------+------------+---------+------------+------------+-------------+
-        | UCR configuration                             |Result                   |             |
-        +-------------+----------+------------+---------+------------+------------+             |
-        | isRepoServer|enabled   |localmirror |server   |sources.list mirror.list |             |
-        +=============+==========+============+=========+============+============+=============+
-        | False       |False     |False       |\-       |\-          |\-          |no           |
-        +             +----------+------------+---------+------------+------------+local        |
-        |             |True      |            |\-       |RS          |\-          |repository   |
-        +             +----------+------------+---------+------------+------------+mirror       |
-        |             |True      |            |CS       |CS          |\-          |             |
-        +-------------+----------+------------+---------+------------+------------+-------------+
-        | True        |False     |False       |         |\-          |\-          |local        |
-        +             +----------+------------+---------+------------+------------+repository   |
-        |             |False     |True        |\-       |\-          |MS          |mirror       |
-        +             +----------+------------+---------+------------+------------+             |
-        |             |False     |True        |CS       |\-          |CS          |             |
-        +             +----------+------------+---------+------------+------------+             |
-        |             |True      |False       |\-       |MS          |\-          |             |
-        +             +----------+------------+---------+------------+------------+             |
-        |             |True      |False       |CS       |CS          |\-          |             |
-        +             +----------+------------+---------+------------+------------+             |
-        |             |True      |True        |\-       |RS          |MS          |             |
-        +             +----------+------------+---------+------------+------------+             |
-        |             |True      |True        |CS       |RS          |CS          |             |
-        +             +----------+------------+---------+------------+------------+-------------+
-        |             |False     |\-          |\-       |\-          |\-          |backward     |
-        +             +----------+            +---------+------------+------------+compabibility|
-        |             |True      |            |\-       |RS          |MS          |[1]_         |
-        +             +----------+            +---------+------------+------------+             |
-        |             |True      |            |CS       |RS          |CS          |             |
-        +-------------+----------+------------+---------+------------+------------+-------------+
-
-        .. [1] if `repository/online/component/%s/localmirror` is unset, then the value of `repository/online/component/%s` will be used to achieve backward compatibility.
-        """
-
-        c_prefix = 'repository/online/component/%s' % component
-        if self.is_repository_server:
-            m_url = UcsRepoUrl(self.configRegistry, 'repository/mirror')
-            c_enabled = self.configRegistry.is_true('repository/online/component/%s' % component, False)
-            c_localmirror = self.configRegistry.is_true('repository/online/component/%s/localmirror' % component, c_enabled)
-
-            if for_mirror_list:  # mirror.list
-                if c_localmirror:
-                    return UcsRepoUrl(self.configRegistry, c_prefix, m_url)
-            else:  # sources.list
-                if c_enabled:
-                    if c_localmirror:
-                        return self.repourl
-                    else:
-                        return UcsRepoUrl(self.configRegistry, c_prefix, m_url)
-        else:
-            return UcsRepoUrl(self.configRegistry, c_prefix, self.repourl)
-
-        raise CannotResolveComponentServerError(component, for_mirror_list)
-
-    def _get_component_server(self, component, for_mirror_list=False):
-        # type: (str, bool) -> UCSHttpServer
-        """
-        Return :py:class:`UCSHttpServer` for component as configures via UCR.
-
-        :param str component: Name of the component.
-        :param bool for_mirror_list: component entries for `mirror.list` will be returned, otherwise component entries for local `sources.list`.
-        :returns: The repository server for the component.
-        :rtype: UCSHttpServer
-        :raises ConfigurationError: if the configured server is not usable.
-        """
-        c_url = copy.copy(self._get_component_baseurl(component, for_mirror_list))
-        c_url.path = ''
-        prefix = self.configRegistry.get('repository/online/component/%s/prefix' % component, '')
-
-        user_agent = self._get_user_agent_string()
-
-        server = UCSHttpServer(
-            baseurl=c_url,
-            user_agent=user_agent,
-            timeout=self.timeout,
-        )
-        try:
-            # if prefix.lower() == 'none' ==> use no prefix
-            if prefix and prefix.lower() == 'none':
-                try:
-                    assert server.access(None, '')
-                except DownloadError as e:
-                    uri, code = e.args
-                    raise ConfigurationError(uri, 'absent prefix forced - component %s not found: %s' % (component, uri))
-            else:
-                for testserver in [
-                    server + '/univention-repository/',
-                    server + self.repourl.path if self.repourl.path else None,
-                    server,
-                ]:
-                    if not testserver:
-                        continue
-                    if prefix:  # append prefix if defined
-                        testserver = testserver + '%s/' % (prefix.strip('/'),)
-                    try:
-                        assert testserver.access(None, '')
-                        return testserver
-                    except DownloadError as e:
-                        ud.debug(ud.NETWORK, ud.ALL, "%s" % e)
-                        uri, code = e.args
-                raise ConfigurationError(uri, 'non-existing component prefix: %s' % (uri,))
-
-        except ConfigurationError:
-            if self.check_access:
-                raise
-        return server
-
-    def _get_component_versions(self, component, start, end):
-        # type: (str, Optional[UCS_Version], Optional[UCS_Version]) -> Set[UCS_Version]
-        """
-        Return configured versions for component.
-
-        :param str component: Name of the component.
-        :param UCS_Version start: smallest version that shall be returned.
-        :param UCS_Version end: largest version that shall be returned.
-        :returns: A set of UCR release versions for which the component is enabled.
-        :rtype: set(UCS_Version)
-
-        For each component the UCR variable `repository/online/component/%s/version`
-        is evaluated, which can be a space/comma separated combination of the following values:
-
-            `current` or /empty/
-                required component; must exist for requested version.
-            /major.minor/
-                use exactly this version.
-        """
-        ver = self.configRegistry.get('repository/online/component/%s/version' % component, '')
-        versions = set()  # type: Set[UCS_Version]
-        for version in RE_SPLIT_MULTI.split(ver):
-            version = self.current_version if version in ('current', '') else UCS_Version(version if '-' in version else '%s-0' % version)
-
-            if start and version < start:
-                continue
-            if end and version > end:
-                continue
-            versions.add(version)
-
-        return versions
-
-    def get_component_repositories(self, component, versions, clean=False, debug=True, for_mirror_list=False):
-        # type: (str, Iterable[UCS_Version], bool, bool, bool) -> List[str]
-        """
-        Return list of Debian repository statements for requested component.
-
-        :param str component: The name of the component.
-        :param versions: A list of UCS releases.
-        :type versions: list[str] or list[UCS_Version].
-        :param bool clean: Add additional `clean` statements for `apt-mirror`.
-        :param bool debug: UNUSED.
-        :param bool for_mirror_list: component entries for `mirror.list` will be returned, otherwise component entries for local `sources.list`.
-        :returns: A list of strings with APT statements.
-        :rtype: list(str)
-        """
-        result = []  # type: List[str]
-
-        versions_mmp = {UCS_Version((v.major, v.minor, 0)) for v in versions}
-        for version in versions_mmp:
-            for server, ver in self._iterate_component_repositories([component], version, version, self.architectures, for_mirror_list=for_mirror_list):
-                result.append(ver.deb(server))
-                if ver.arch == self.architectures[-1]:  # after architectures but before next patch(level)
-                    if clean:
-                        result.append(ver.clean(server))
-                    if self.sources:
-                        ver.arch = "source"
-                        try:
-                            code, size, content = server.access(ver, "Sources.gz")
-                            if size >= MIN_GZIP:
-                                result.append(ver.deb(server, "deb-src"))
-                        except DownloadError as e:
-                            ud.debug(ud.NETWORK, ud.ALL, "%s" % e)
-
-        return result
 
     def print_component_repositories(self, clean=False, start=None, end=None, for_mirror_list=False):
         # type: (bool, Optional[UCS_Version], Optional[UCS_Version], bool) -> str
@@ -1684,9 +1690,10 @@ class UniventionUpdater(object):
 
         result = []  # type: List[str]
         for component in self.get_components(only_localmirror_enabled=for_mirror_list):
-                versions = self._get_component_versions(component, start, end)
-                repos = self.get_component_repositories(component, versions, clean, for_mirror_list=for_mirror_list)
-                result += repos
+            comp = self.component(component)
+            versions = comp.versions(start, end)
+            repos = comp.repositories(versions, clean=clean, for_mirror_list=for_mirror_list)
+            result += repos
         return '\n'.join(result)
 
     def _get_user_agent_string(self):

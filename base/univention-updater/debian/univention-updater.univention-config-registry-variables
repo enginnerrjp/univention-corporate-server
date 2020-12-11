@@ -106,6 +106,12 @@ Description[en]=In addition to the standard repository additional components can
 Type=bool
 Categories=service-software-management
 
+[repository/online/component/.*/defaultpackages?]
+Description[de]=Ein Liste von Paketnamen der Komponente, die standardmäßig installiert werden sollen.
+Description[en]=A list of package names from the component, which should be installed by default.
+Type=str
+Categories=service-software-management
+
 [repository/online/component/.*/description]
 Description[de]=Die Beschreibung einer Repository-Komponente.
 Description[en]=The description of a repository component.
