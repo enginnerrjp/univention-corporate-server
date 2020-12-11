@@ -1,12 +1,12 @@
 #!/usr/bin/python2.7
 # vim:set fileencoding=utf-8 filetype=python tabstop=4 shiftwidth=4 expandtab:
-"""Unit test for univention.updater.tools"""
 # pylint: disable-msg=C0301,W0212,C0103,R0904
-import unittest
+
+"""Unit test for univention.updater.tools"""
+
 import os.path
-import univention
-univention.__path__.insert(0, os.path.abspath('modules/univention'))  # type: ignore
-import univention.updater.tools as U  # noqa: E402
+
+import univention.updater.tools as U
 
 
 SCRIPT = "#!/bin/sh\nexit 0\n"
@@ -30,14 +30,6 @@ erp3pQbx5rD0cMYJBw3K
 """
 
 
-class TestSignatures(unittest.TestCase):
+class TestSignatures(object):
     def test_verify_script(self):
         self.assertIsNone(U.verify_script(SCRIPT, SIGNATURE))
-
-
-if __name__ == '__main__':
-    if False:
-        import univention.debug as ud
-        ud.init('stderr', ud.NO_FUNCTION, ud.NO_FLUSH)
-        ud.set_level(ud.NETWORK, ud.ALL + 1)
-    unittest.main()

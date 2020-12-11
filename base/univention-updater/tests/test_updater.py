@@ -1,12 +1,14 @@
 #!/usr/bin/python2.7
 # vim:set fileencoding=utf-8 filetype=python tabstop=4 shiftwidth=4 expandtab:
-"""Unit test for univention.updater.tools"""
 # pylint: disable-msg=C0301,W0212,C0103,R0904
+
+"""Unit test for univention.updater.tools"""
 
 from __future__ import print_function
 
-import unittest
 from tempfile import NamedTemporaryFile
+
+import unittest
 import six
 from mockups import (
     U, MAJOR, MINOR, PATCH, ARCH, ERRAT, PART,

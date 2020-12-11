@@ -1,27 +1,44 @@
 #!/usr/bin/python2.7
 # vim:set fileencoding=utf-8 filetype=python tabstop=4 shiftwidth=4 expandtab:
-"""Unit test for univention.updater.mirror"""
 # pylint: disable-msg=C0301,W0212,C0103,R0904
+
+"""Unit test for univention.updater.mirror"""
+
+import json
 import os
 import unittest
-from tempfile import mkdtemp
-from shutil import rmtree
-import json
 from copy import deepcopy
+from shutil import rmtree
+from tempfile import mkdtemp
+
+import pytest
+
+from mockups import ARCH, MAJOR, MINOR, PATCH, M, MockFile, MockUCSHttpServer, U, gen_releases
 from univention.lib.ucs import UCS_Version
-from mockups import (
-    U, M, MAJOR, MINOR, PATCH, ARCH,
-    MockFile, MockConfigRegistry, MockUCSHttpServer, MockPopen,
-    gen_releases,
-)
 
 UM = M.UniventionMirror
 DATA = 'x' * U.MIN_GZIP
 
 
+@pytest.fixture
+def m():
+    return M.UniventionMirror()
+
+
 class TestUniventionMirror(unittest.TestCase):
 
     """Unit test for univention.updater.mirror"""
+
+    @pytest.fixture(autouse=True)
+    def ucr(self, tmpdir, ucr):
+        ucr({
+            'repository/mirror/basepath': str(tmpdir / 'repo'),
+            # 'repository/mirror/version/end': '%d.%d-%d' % (MAJOR, MINOR, PATCH),
+            # 'repository/mirror/version/start': '%d.%d-%d' % (MAJOR, 0, 0),
+            'repository/mirror/architectures': ' '.join(ARCH),
+            'repository/mirror/verify': 'no',
+        })
+        return ucr
 
     def setUp(self):
         """Create Mirror mockup."""
@@ -34,20 +51,8 @@ class TestUniventionMirror(unittest.TestCase):
         self.base_dir = mkdtemp()
         self.mock_file = MockFile(os.path.join(self.base_dir, 'mock'))
         __builtins__.open = self.mock_file
-        MockConfigRegistry._EXTRA = {
-            'repository/mirror/basepath': os.path.join(self.base_dir, 'repo'),
-            # 'repository/mirror/version/end': '%d.%d-%d' % (MAJOR, MINOR, PATCH),
-            # 'repository/mirror/version/start': '%d.%d-%d' % (MAJOR, 0, 0),
-            'repository/mirror/architectures': ' '.join(ARCH),
-            'repository/mirror/verify': 'no',
-        }
         self.m = M.UniventionMirror()
         MockPopen.mock_reset()
-
-    def _ucr(self, variables):
-        """Fill UCR mockup."""
-        for key, value in variables.items():
-            self.m.configRegistry[key] = value
 
     def _uri(self, uris):
         """Fill URI mockup."""
@@ -60,13 +65,12 @@ class TestUniventionMirror(unittest.TestCase):
         rmtree(self.base_dir, ignore_errors=True)
         del self.base_dir
         del self.m
-        MockConfigRegistry._EXTRA = {}
         MockUCSHttpServer.mock_reset()
         MockPopen.mock_reset()
 
-    def test_config_repository(self):
+    def test_config_repository(self, ucr):
         """Test setup from UCR repository/mirror."""
-        self._ucr({
+        ucr({
             'repository/mirror': 'no',
             'repository/mirror/server': 'example.net',
             'repository/mirror/port': '1234',
@@ -86,22 +90,19 @@ class TestUniventionMirror(unittest.TestCase):
 
     # TODO: Copy over test_updater
 
-    def test_mirror_repositories(self):
+    def test_mirror_repositories(self, mocker):
         """Test mirror structure and apt-mirror called."""
+        popen = mocker.patch("subprocess.Popen")
         self.mock_file.mock_whitelist.add('/var/log/univention')
         self.m.mirror_repositories()
         self.assertTrue(os.path.isdir(os.path.join(self.base_dir, 'repo', 'var')))
         self.assertTrue(os.path.isdir(os.path.join(self.base_dir, 'repo', 'skel')))
         self.assertTrue(os.path.isdir(os.path.join(self.base_dir, 'repo', 'mirror')))
         self.assertTrue(os.path.islink(os.path.join(self.base_dir, 'repo', 'mirror', 'univention-repository')))
-        cmds = MockPopen.mock_get()
-        cmd = cmds[0]
-        if isinstance(cmd, (list, tuple)):
-            cmd = cmd[0]
-        self.assertTrue('apt-mirror' in cmd)
+        assert "apt-mirror" in popen.call_args_list[0][0]
 
-    def test_mirror_update_scripts(self):
-        self._ucr({
+    def test_mirror_update_scripts(self, ucr):
+        ucr({
             'repository/online/component/a': 'yes',
             'repository/online/component/b': 'yes',
             'repository/mirror/version/start': '%d.%d-%d' % (MAJOR, 0, 0),
@@ -202,12 +203,16 @@ class TestUniventionMirrorList(unittest.TestCase):
 
     """Test listing locally available repositories."""
 
+    @pytest.fixture(autouse=True)
+    def ucr(self, tmpdir, ucr):
+        ucr({
+            'repository/mirror/basepath': str(tmpdir),
+        })
+        return ucr
+
     def setUp(self):
         """Create Mirror mockup."""
         self.base_dir = mkdtemp()
-        MockConfigRegistry._EXTRA = {
-            'repository/mirror/basepath': self.base_dir,
-        }
         self._uri({
             '': b'',
             '/': b'',
@@ -242,7 +247,6 @@ class TestUniventionMirrorList(unittest.TestCase):
         rmtree(self.base_dir, ignore_errors=True)
         del self.base_dir
         del self.m
-        MockConfigRegistry._EXTRA = {}
 
     def assertDeepEqual(self, seq1, seq2):
         """Tests that two lists or tuples are equal."""
