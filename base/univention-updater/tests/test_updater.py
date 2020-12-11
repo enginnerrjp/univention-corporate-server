@@ -436,12 +436,11 @@ class TestUniventionUpdater(unittest.TestCase):
 
     def test_run_dist_upgrade(self):
         """Test running dist-upgrade."""
-        _rc, _stdout, _stderr = self.u.run_dist_upgrade()
+        _rc = self.u.run_dist_upgrade()
         cmds = MockPopen.mock_get()
         cmd = cmds[0]
         if isinstance(cmd, (list, tuple)):
             cmd = ' '.join(cmd)
-        self.assertTrue('DEBIAN_FRONTEND=noninteractive' in cmd)
         self.assertTrue(' dist-upgrade' in cmd)
 
     def test__iterate_release(self):
