@@ -37,6 +37,8 @@ class TestUniventionUpdater(unittest.TestCase):
         """Fill URI mockup."""
         for key, value in uris.items():
             MockUCSHttpServer.mock_add(key, value)
+            if 'releases.json' in key:
+                self.u._get_releases()
 
     def tearDown(self):
         """Clean up Updater mockup."""
