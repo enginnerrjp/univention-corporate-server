@@ -41,6 +41,7 @@ class TestUniventionMirror(unittest.TestCase):
             'repository/mirror/verify': 'no',
         }
         self.m = M.UniventionMirror()
+        MockPopen.mock_reset()
 
     def _ucr(self, variables):
         """Fill UCR mockup."""

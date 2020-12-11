@@ -906,7 +906,7 @@ class UniventionUpdater(object):
         self.log.addHandler(logging.NullHandler())
         self.check_access = check_access
         self.connection = None
-        self.architectures = [os.popen('dpkg --print-architecture 2>/dev/null').readline()[:-1]]
+        self.architectures = [subprocess.check_output(('dpkg', '--print-architecture')).decode('ASCII').strip()]
 
         self.ucr_reinit()
 
