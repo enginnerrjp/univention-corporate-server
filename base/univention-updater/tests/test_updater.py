@@ -187,12 +187,6 @@ class TestUniventionUpdater(unittest.TestCase):
         self.assertTrue(isinstance(ver, U.UCS_Version))
         self.assertEqual(U.UCS_Version((3, 0, 1)), ver)
 
-    def test_get_ucs_version(self):
-        """Test current version string."""
-        ver = self.u.get_ucs_version()
-        self.assertTrue(isinstance(ver, six.string_types))
-        self.assertEqual('3.0-1', ver)
-
     def test_get_components(self):
         """Test enabled components."""
         self._ucr({
