@@ -1010,16 +1010,28 @@ class UniventionUpdater(object):
             ud.debug(ud.NETWORK, ud.ERROR, 'Querying maintenance information failed: %s' % (exc,))
             self.releases = {"error": str(exc)}
 
-    def get_releases(self):
-        # type: () -> Iterator[UCS_Version]
+    def get_releases(self, start=None, end=None):
+        # type: (Optional[UCS_Version], Optional[UCS_Version]) -> Iterator[UCS_Version]
+        """
+        Return UCS releases in range.
+
+        :param start: Minimum requried version.
+        :param end: Maximum allowed version.
+        :returns: Iterator of versions.
+        """
         for major_release in self.releases.get('releases', []):
             for minor_release in major_release['minors']:
                 for patchlevel_release in minor_release['patchlevels']:
-                    yield UCS_Version((
+                    ver = UCS_Version((
                         major_release['major'],
                         minor_release['minor'],
                         patchlevel_release['patchlevel']
                     ))
+                    if start and ver < start:
+                        continue
+                    if end and ver > end:
+                        continue
+                    yield ver
 
     def get_next_version(self, version, components=[], errorsto='stderr'):
         # type: (UCS_Version, Iterable[str], Literal["stderr", "exception", "none"]) -> Optional[UCS_Version]
@@ -1035,36 +1047,28 @@ class UniventionUpdater(object):
         :rtype: UCS_Version or None
         :raises RequiredComponentError: if a required component is missing
         """
-        debug = (errorsto == 'stderr')
-        releases = list(self.get_releases())
+        try:
+            ver = min(ver for ver in self.get_releases() if ver > version)
+        except ValueError:
+            return None
 
-        for ver in (
-            UCS_Version((version.major, version.minor, version.patchlevel + 1)),
-            UCS_Version((version.major, version.minor + 1, 0)),
-            UCS_Version((version.major + 1, 0, 0)),
-        ):
-            self.log.info('Checking for version %s', ver)
-            if ver not in releases:
-                continue
-            self.log.info('Found version %s', ver)
+        self.log.info('Found version %s', ver)
 
-            failed = set()
-            for component in components:
-                self.log.info('Checking for component %s', component)
-                if not self.get_component_repositories(component, [ver], clean=False, debug=debug):
-                    self.log.error('Missing component %s', component)
-                    failed.add(component)
-            if failed:
+        failed = set(
+            component
+            for component in components
+            if not self.get_component_repositories(component, [ver], clean=False, debug=(errorsto == 'stderr'))
+        )
+        if failed:
                 ex = RequiredComponentError(str(ver), failed)
                 if errorsto == 'exception':
                     raise ex
                 elif errorsto == 'stderr':
                     print(ex, file=sys.stderr)
                 return None
-            else:
-                self.log.info('Going for version %s', ver)
-                return ver
-        return None
+
+        self.log.info('Going for version %s', ver)
+        return ver
 
     def get_all_available_release_updates(self, ucs_version=None):
         # type: (Optional[UCS_Version]) -> Tuple[List[UCS_Version], Optional[Set[str]]]
@@ -1491,7 +1495,7 @@ class UniventionUpdater(object):
         :returns: A iterator returning 2-tuples (server, ver).
         """
         self.log.info('Searching releases [%s..%s), dists=%s', start, end, dists)
-        releases = sorted(r for r in self.get_releases() if r >= start and r <= end)
+        releases = sorted(self.get_releases(start, end))
         for release in releases:
             yield self.server, UCSRepoPool5(
                 major=release['major'],

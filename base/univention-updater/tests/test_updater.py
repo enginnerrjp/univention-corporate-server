@@ -75,6 +75,14 @@ class TestUniventionUpdater(unittest.TestCase):
         self.assertEqual(MAJOR, self.u.version_major)
         self.assertEqual(MINOR, self.u.version_minor)
 
+    def test_get_releases(self):
+        self._uri({
+            'releases.json': gen_releases([(MAJOR, minor, patch) for minor in range(3) for patch in range(3)])
+        })
+        expected = [U.UCS_Version((MAJOR, 1, patch)) for patch in range(3)]
+        found = list(self.u.get_releases(start=expected[0], end=expected[-1]))
+        self.assertEqual(expected, found)
+
     def test_get_next_version(self):
         """Test no next version."""
         ver = self.u.get_next_version(version=U.UCS_Version((MAJOR, MINOR, PATCH)))
