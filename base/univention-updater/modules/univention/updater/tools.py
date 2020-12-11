@@ -905,6 +905,7 @@ class UniventionUpdater(object):
         self.connection = None
         self.architectures = [subprocess.check_output(('dpkg', '--print-architecture')).decode('ASCII').strip()]
 
+        self.configRegistry = ConfigRegistry()
         self.ucr_reinit()
 
     def config_repository(self):
@@ -923,7 +924,6 @@ class UniventionUpdater(object):
         """
         Re-initialize settings.
         """
-        self.configRegistry = ConfigRegistry()
         self.configRegistry.load()
 
         self.is_repository_server = self.configRegistry.is_true('local/repository', False)
@@ -948,10 +948,8 @@ class UniventionUpdater(object):
             self.parts.append('unmaintained')
 
         # UCS version
-        self.ucs_version = self.configRegistry['version/version']
-        self.patchlevel = int(self.configRegistry['version/patchlevel'])
+        self.current_version = UCS_Version("%(version/version)s-%(version/patchlevel)s" % self.configRegistry)
         self.erratalevel = int(self.configRegistry.get('version/erratalevel', 0))
-        self.version_major, self.version_minor = map(int, self.ucs_version.split('.', 1))
 
         # override automatically detected architecture by UCR variable repository/online/architectures (comma or space separated)
         archlist = self.configRegistry.get('repository/online/architectures', '')
@@ -1081,10 +1079,7 @@ class UniventionUpdater(object):
         :returns: a list of 2-tuple `(versions, blocking_component)`, where `versions` is a list of UCS release and `blocking_component` is the first missing component blocking the update.
         :rtype: tuple(list[str], str or None)
         """
-
-        if not ucs_version:
-            ucs_version = self.current_version
-
+        ucs_version = ucs_version or self.current_version
         components = self.get_current_components()
 
         result = []  # type: List[UCS_Version]
@@ -1112,8 +1107,7 @@ class UniventionUpdater(object):
         :returns: The next UCS release or None.
         :rtype: str or None
         """
-        if not ucs_version:
-            ucs_version = self.current_version
+        ucs_version = ucs_version or self.current_version
 
         components = self.get_current_components()
 
@@ -1151,17 +1145,6 @@ class UniventionUpdater(object):
                 raise ConfigurationError(uri, 'component not found')
             result += repos
         return result
-
-    @property
-    def current_version(self):
-        # type: () -> UCS_Version
-        """
-        Return current (major.minor-patchlevel) version.
-
-        :returns: The current UCS release.
-        :rtype: UCS_Version
-        """
-        return UCS_Version((self.version_major, self.version_minor, self.patchlevel))
 
     def get_components(self, only_localmirror_enabled=False):
         # type: (bool) -> Set[str]
