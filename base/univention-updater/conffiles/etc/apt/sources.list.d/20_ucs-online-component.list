@@ -8,7 +8,12 @@ try:
 	updater = UniventionUpdater()
 
 	if updater.online_repository:
-		print(updater.print_component_repositories())
+		ver = updater.current_version
+		for name in updater.get_components():
+			comp = updater.component(name)
+			vers = comp.versions(ver, ver)
+			for repo in comp.repositories(vers):
+				print(repo)
 	else:
 		print('# The online repository is disabled and can be enabled with:')
 		print('#   univention-config-registry set repository/online=true')
