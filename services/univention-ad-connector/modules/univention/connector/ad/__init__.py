@@ -696,14 +696,71 @@ class Simple_AD_Connection():
 
 
 class ad(univention.connector.ucs):
+	RANGE_RETRIEVAL_PATTERN = re.compile(r"^([^;]+);range=(\d+)-(\d+|\*)$")
 
-	range_retrieval_pattern = re.compile("^([^;]+);range=(\d+)-(\d+|\*)$")
+	@classmethod
+	def main(cls, ucr=None, configbasename='connector', **kwargs):
+		if ucr is None:
+			ucr = ConfigRegistry()
+			ucr.load()
+		MAPPING_FILENAME = '/etc/univention/%s/ad/mapping.py' % configbasename
+		if six.PY2:
+			import imp
+			mapping = imp.load_source('mapping', MAPPING_FILENAME)
+		else:
+			import importlib.util
+			spec = importlib.util.spec_from_file_location(os.path.basename(MAPPING_FILENAME).rsplit('.', 1)[0], MAPPING_FILENAME)
+			mapping = importlib.util.module_from_spec(spec)
+			spec.loader.exec_module(mapping)
 
-	def __init__(self, CONFIGBASENAME, property, baseConfig, ad_ldap_host, ad_ldap_port, ad_ldap_base, ad_ldap_binddn, ad_ldap_bindpw, ad_ldap_certificate, listener_dir, init_group_cache=True):
+		_ucr = dict(ucr)
+		try:
+			ad_ldap_host = _ucr['%s/ad/ldap/host' % configbasename]
+			ad_ldap_port = _ucr['%s/ad/ldap/port' % configbasename]
+			ad_ldap_base = _ucr['%s/ad/ldap/base' % configbasename]
+			ad_ldap_binddn = _ucr['%s/ad/ldap/binddn' % configbasename]
+			ad_ldap_bindpw = _ucr['%s/ad/ldap/bindpw' % configbasename]
+			ad_ldap_certificate = _ucr.get('%s/ad/ldap/certificate' % configbasename)
+			listener_dir = _ucr['%s/ad/listener/dir' % configbasename]
+		except KeyError as exc:
+			raise SystemExit('UCR variable %s is not set' % (exc,))
 
-		univention.connector.ucs.__init__(self, CONFIGBASENAME, property, baseConfig, listener_dir)
+		if ucr.is_true('%s/ad/ldap/ssl' % configbasename, True) or ucr.is_true('%s/ad/ldap/ldaps' % configbasename, False):
+			if ad_ldap_certificate:
+				# create a new CAcert file, which contains the UCS CA and the AD CA,
+				# see Bug #17768 for details
+				#  https://forge.univention.org/bugzilla/show_bug.cgi?id=17768
+				new_ca_filename = '/var/cache/univention-ad-connector/CAcert-%s.pem' % (configbasename,)
+				with open(new_ca_filename, 'wb') as new_ca:
+					with open('/etc/univention/ssl/ucsCA/CAcert.pem', 'rb') as ca:
+						new_ca.write(b''.join(ca.readlines()))
 
-		self.CONFIGBASENAME = CONFIGBASENAME
+					with open(ad_ldap_certificate, 'rb') as ca:
+						new_ca.write(b''.join(ca.readlines()))
+
+				ldap.set_option(ldap.OPT_X_TLS_CACERTFILE, new_ca_filename)
+			else:
+				ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_NEVER)
+
+		with open(ad_ldap_bindpw) as fd:
+			ad_ldap_bindpw = fd.read().rstrip()
+
+		return cls(
+			configbasename,
+			mapping.ad_mapping,
+			ucr,
+			ad_ldap_host,
+			ad_ldap_port,
+			ad_ldap_base,
+			ad_ldap_binddn,
+			ad_ldap_bindpw,
+			ad_ldap_certificate,
+			listener_dir,
+			**kwargs
+		)
+
+	def __init__(self, CONFIGBASENAME, property, configRegistry, ad_ldap_host, ad_ldap_port, ad_ldap_base, ad_ldap_binddn, ad_ldap_bindpw, ad_ldap_certificate, listener_dir, logfilename=None, debug_level=None):
+		univention.connector.ucs.__init__(self, CONFIGBASENAME, property, configRegistry, listener_dir, logfilename, debug_level)
 
 		self.ad_ldap_host = ad_ldap_host
 		self.ad_ldap_port = ad_ldap_port
