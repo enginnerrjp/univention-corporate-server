@@ -1,3 +1,9 @@
+univention-docker (5.0.0-2) unstable; urgency=medium
+
+  * Bug #52344: Add two UCR variables for docker/daemon.json customisation
+
+ -- Christian Castens <castens@univention.de>  Fri, 18 Dec 2020 10:24:38 +0100
+
 univention-docker (5.0.0-1) unstable; urgency=medium
 
   * Bug #51419: UCS-5.0-0 version bump
