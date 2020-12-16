@@ -342,10 +342,9 @@ class attribute(object):
 		self.con_attribute = con_attribute
 		self.con_attribute_encoding = con_attribute_encoding
 		self.con_other_attribute = con_other_attribute
-		self.con_depends = con_depends
 		self.required = required
-		self.compare_function = compare_function
-		self.con_value_merge_function = con_value_merge_function
+		# If no compare_function is given, we default to `compare_normal()`
+		self.compare_function = compare_function or compare_normal
 		if mapping:
 			self.mapping = mapping
 		# Make a reverse check of this mapping. This is neccessary if the attribute is
@@ -381,12 +380,15 @@ class property(object):
 		dn_mapping_function=[],
 		attributes=None,
 		ucs_create_functions=[],
+		con_create_extensions=[],
 		post_con_create_functions=[],
 		post_con_modify_functions=[],
 		post_ucs_modify_functions=[],
 		post_attributes=None,
 		mapping_table=None,
-		position_mapping=[]):
+		position_mapping=[],
+		disable_delete_in_ucs=False,
+		con_subtree_delete_objects=[]):
 
 		self.ucs_default_dn = ucs_default_dn
 
@@ -413,6 +415,7 @@ class property(object):
 		self.attributes = attributes
 
 		self.ucs_create_functions = ucs_create_functions
+		self.con_create_extensions = con_create_extensions
 
 		self.post_con_create_functions = post_con_create_functions
 		self.post_con_modify_functions = post_con_modify_functions
@@ -421,6 +424,10 @@ class property(object):
 		self.post_attributes = post_attributes
 		self.mapping_table = mapping_table
 		self.position_mapping = position_mapping
+
+		self.con_subtree_delete_objects = con_subtree_delete_objects
+
+		self.disable_delete_in_ucs = disable_delete_in_ucs
 
 	def __repr__(self):
 		return 'univention.connector.property(**%s)' % (pprint.pformat(dict(self.__dict__), indent=4, width=250),)
@@ -495,6 +502,8 @@ class ucs(object):
 			ud.debug(ud.LDAP, ud.INFO, 'Lost connection to the LDAP server. Trying to reconnect ...')
 			try:
 				self.open_ucs()
+				result = self.lo.search(filter=filter, base=base, scope=scope, attr=attr, unique=unique, required=required, timeout=timeout, sizelimit=sizelimit)
+				return result
 			except ldap.SERVER_DOWN:
 				ud.debug(ud.LDAP, ud.INFO, 'LDAP-Server seems to be down')
 				raise search_exception
@@ -755,17 +764,6 @@ class ucs(object):
 				mapped_object = self._object_mapping(key, object, 'ucs')
 				if not self._ignore_object(key, object) or ignore_subtree_match:
 					ud.debug(ud.LDAP, ud.INFO, "__sync_file_from_ucs: finished mapping")
-
-					if change_type == 'modify':
-						# to be able to compare mapped values we need to map the old state of the object too
-						if old_dn:
-							object_old = {'dn': object['olddn'], 'modtype': change_type, 'attributes': old}
-						else:
-							object_old = {'dn': object['dn'], 'modtype': change_type, 'attributes': old}
-						object_old = self._object_mapping(key, object_old, 'ucs')
-					else:
-						object_old = {'dn': object['dn'], 'modtype': change_type, 'attributes': {}}  # Dummy
-
 					try:
 						if not self.sync_from_ucs(key, mapped_object, pre_mapped_ucs_dn, old_dn, old, new):
 							self._save_rejected_ucs(filename, dn)
@@ -956,7 +954,7 @@ class ucs(object):
 		for listener_file in files:
 			sync_successfull = False
 			filename = os.path.join(self.listener_dir, listener_file)
-			if os.path.isfile(filename):
+			if not filename == "%s/tmp" % self.configRegistry['%s/ad/listener/dir' % self.CONFIGBASENAME]:
 				if filename not in self.rejected_files:
 					try:
 						with open(filename, 'rb') as fob:
@@ -1010,9 +1008,6 @@ class ucs(object):
 			print("Changes from UCS: %s (%s saved rejected)" % (change_counter, '0'))
 		print("--------------------------------------")
 		sys.stdout.flush()
-
-		if self.profiling and change_counter:
-			ud.debug(ud.LDAP, ud.PROCESS, "POLL FROM UCS: Processed %s" % (change_counter,))
 		return change_counter
 
 	def poll(self, show_deleted=True):
@@ -1059,7 +1054,7 @@ class ucs(object):
 				# the value isn't set in the ad directory, but it could be set in ucs, so we should delete it on ucs side
 
 				# prevent value resets of mandatory attributes
-				mandatory_attrs = ['lastname']
+				mandatory_attrs = ['lastname', 'unixhome', 'gidNumber', 'uidNumber']
 
 				ucs_key = attributes.ucs_attribute
 				if ucs_object.has_property(ucs_key):
@@ -1308,9 +1303,39 @@ class ucs(object):
 				ud.debug(ud.LDAP, ud.INFO, "sync_to_ucs ignored, no mapping defined")
 			return True
 
-		if object['dn'].find('\\0ACNF:') > 0:
-			ud.debug(ud.LDAP, ud.PROCESS, 'Ignore conflicted object: %s' % object['dn'])
-			return True
+		ucs_object_dn = object.get('olddn', object['dn'])
+		old_object = self.get_ucs_object(property_type, ucs_object_dn)
+		if old_object and object['modtype'] == 'add':
+			object['modtype'] = 'modify'
+		if not old_object and object['modtype'] == 'modify':
+			object['modtype'] = 'add'
+		if not old_object and object['modtype'] == 'move':
+			object['modtype'] = 'add'
+
+		ud.debug(ud.LDAP, ud.PROCESS, 'sync to ucs:   [%14s] [%10s] %r' % (property_type, object['modtype'], object['dn']))
+
+		if object['modtype'] in ('delete', 'move'):
+			try:
+				del self.group_member_mapping_cache_ucs[object['dn'].lower()]
+				ud.debug(ud.LDAP, ud.INFO, "sync_to_ucs: %s removed from UCS group member mapping cache" % object['dn'])
+			except KeyError:
+				pass
+			try:
+				del self.group_member_mapping_cache_con[pre_mapped_ad_dn.lower()]
+				ud.debug(ud.LDAP, ud.INFO, "sync_to_ucs: %s removed from AD group member mapping cache" % pre_mapped_ad_dn)
+			except KeyError:
+				pass
+
+		position = univention.admin.uldap.position(self.configRegistry['ldap/base'])
+
+		if object['dn'] != self.configRegistry['ldap/base']:
+			try:
+				parent_dn = self.lo.parentDn(object['dn'])
+				position.setDn(parent_dn)
+				ud.debug(ud.LDAP, ud.INFO, 'sync_to_ucs: set position to %s' % parent_dn)
+			except univention.admin.uexceptions.noObject:
+				# In this case we use the base DN
+				pass
 
 		try:
 			guid = decode_guid(original_object.get('attributes').get('objectGUID')[0])
@@ -1321,11 +1346,12 @@ class ucs(object):
 				ud.debug(ud.LDAP, ud.INFO, "sync_to_ucs: old_ad_object: %s" % old_ad_object)
 				ud.debug(ud.LDAP, ud.INFO, "sync_to_ucs: new_ad_object: %s" % original_object['attributes'])
 				if old_ad_object:
+					object['old_ad_object'] = old_ad_object
 					for attr in original_object['attributes']:
-						if old_ad_object.get(attr) != original_attributes.get(attr):
+						if old_ad_object.get(attr) != original_object['attributes'].get(attr):
 							object['changed_attributes'].append(attr)
 					for attr in old_ad_object:
-						if old_ad_object.get(attr) != original_attributes.get(attr):
+						if old_ad_object.get(attr) != original_object['attributes'].get(attr):
 							if attr not in object['changed_attributes']:
 								object['changed_attributes'].append(attr)
 					if not (set(object['changed_attributes']) - self.irrelevant_attributes):
@@ -1338,40 +1364,10 @@ class ucs(object):
 
 			result = False
 
-			# Check if the object on UCS side should be synchronized
-			#  https://forge.univention.org/bugzilla/show_bug.cgi?id=37351
-			old_ucs_ldap_object = {}
-			old_ucs_ldap_object['dn'] = object.get('olddn', object['dn'])
-			old_ucs_ldap_object['attributes'] = self.get_ucs_ldap_object(old_ucs_ldap_object['dn'])
-
-			if old_ucs_ldap_object['attributes'] and self._ignore_object(property_type, old_ucs_ldap_object):
-				ud.debug(ud.LDAP, ud.PROCESS, 'The object %r will be ignored because a valid match filter for this object was not found.' % (old_ucs_ldap_object['dn'],))
-				return True
-
-			old_object = self.get_ucs_object(property_type, object.get('olddn', object['dn']))
-
-			if old_object and object['modtype'] == 'add':
-				object['modtype'] = 'modify'
-			if not old_object and object['modtype'] == 'modify':
-				object['modtype'] = 'add'
-			if not old_object and object['modtype'] == 'move':
-				object['modtype'] = 'add'
-
-			if self.group_mapping_cache_ucs.get(object['dn'].lower()) and object['modtype'] != 'delete':
-				self.group_mapping_cache_ucs[object['dn'].lower()] = None
-
-			ud.debug(ud.LDAP, ud.PROCESS, 'sync to ucs:   [%14s] [%10s] %s' % (property_type, object['modtype'], object['dn']))
-			position = univention.admin.uldap.position(self.baseConfig['ldap/base'])
-
-			parent_dn = self.lo.parentDn(object['dn'])
-			ud.debug(ud.LDAP, ud.INFO, 'sync_to_ucs: set position to %s' % parent_dn)
-			position.setDn(parent_dn)
-
 			module = self.modules[property_type]  # default, determined by mapping filter
 			if old_object:
 				ud.debug(ud.LDAP, ud.INFO, "sync_to_ucs: using existing target object type: %s" % (old_object.module,))
 				module = univention.admin.modules.get(old_object.module)
-
 			if object['modtype'] == 'add':
 				result = self.add_in_ucs(property_type, object, module, position)
 				self._check_dn_mapping(object['dn'], pre_mapped_ad_dn)
@@ -1388,6 +1384,7 @@ class ucs(object):
 				result = self.move_in_ucs(property_type, object, module, position)
 				self._remove_dn_mapping(object['olddn'], '')  # we don't know the old ad-dn here anymore, will be checked by remove_dn_mapping
 				self._check_dn_mapping(object['dn'], pre_mapped_ad_dn)
+				# Check ADcache
 
 			if object['modtype'] == 'modify':
 				result = self.modify_in_ucs(property_type, object, module, position)
@@ -1398,11 +1395,17 @@ class ucs(object):
 				ud.debug(ud.LDAP, ud.WARN, "Failed to get Result for DN (%r)" % (object['dn'],))
 				return False
 
-			if object['modtype'] in ['add', 'modify']:
-				for f in self.property[property_type].post_ucs_modify_functions:
-					ud.debug(ud.LDAP, ud.INFO, "Call post_ucs_modify_functions: %s" % f)
-					f(self, property_type, object)
-					ud.debug(ud.LDAP, ud.INFO, "Call post_ucs_modify_functions: %s (done)" % f)
+			try:
+				if object['modtype'] in ['add', 'modify']:
+					for post_ucs_modify_function in self.property[property_type].post_ucs_modify_functions:
+						ud.debug(ud.LDAP, ud.INFO, "Call post_ucs_modify_functions: %s" % post_ucs_modify_function)
+						post_ucs_modify_function(self, property_type, object)
+						ud.debug(ud.LDAP, ud.INFO, "Call post_ucs_modify_functions: %s (done)" % post_ucs_modify_function)
+			except ldap.SERVER_DOWN:
+				raise
+			except Exception:  # FIXME: which exception is to be caught?
+				self._debug_traceback(ud.ERROR, "failed in post_con_modify_functions")
+				result = False
 
 			ud.debug(ud.LDAP, ud.INFO, "Return  result for DN (%s)" % object['dn'])
 			return result
@@ -1580,20 +1583,22 @@ class ucs(object):
 		if 'dn' not in object:
 			ud.debug(ud.LDAP, ud.INFO, "_ignore_object: ignore object without DN (key: {})".format(key))
 			return True  # ignore not existing object
-		for subtree in self.property[key].ignore_subtree:
-			if self._subtree_match(object['dn'], subtree):
-				ud.debug(ud.LDAP, ud.INFO, "_ignore_object: ignore object because of subtree match: [%s] (key: %s)" % (object['dn'], key))
+
+		if self.property.get(key):
+			for subtree in self.property[key].ignore_subtree:
+				if self._subtree_match(object['dn'], subtree):
+					ud.debug(ud.LDAP, ud.INFO, "_ignore_object: ignore object because of subtree match: [%r]" % object['dn'])
+					return True
+
+			if self.property[key].ignore_filter and self._filter_match(self.property[key].ignore_filter, object['attributes']):
+				ud.debug(ud.LDAP, ud.INFO, "_ignore_object: ignore object because of ignore_filter: [%r]" % object['dn'])
 				return True
 
-		if self.property[key].ignore_filter and self._filter_match(self.property[key].ignore_filter, object['attributes']):
-			ud.debug(ud.LDAP, ud.INFO, "_ignore_object: ignore object because of ignore_filter (key: {})".format(key))
-			return True
+			if self.property[key].match_filter and not self._filter_match(self.property[key].match_filter, object['attributes']):
+				ud.debug(ud.LDAP, ud.INFO, "_ignore_object: ignore object because of match_filter: [%r]" % object['dn'])
+				return True
 
-		if self.property[key].match_filter and not self._filter_match(self.property[key].match_filter, object['attributes']):
-			ud.debug(ud.LDAP, ud.INFO, "_ignore_object: ignore object because of match_filter (key: {})".format(key))
-			return True
-
-		ud.debug(ud.LDAP, ud.INFO, "_ignore_object: Do not ignore %s (key: %s)" % (object['dn'], key))
+		ud.debug(ud.LDAP, ud.INFO, "_ignore_object: Do not ignore %s" % object['dn'])
 
 		return False
 
@@ -1612,7 +1617,6 @@ class ucs(object):
 		"""
 		ud.debug(ud.LDAP, ud.INFO, "_object_mapping: map with key %s and type %s" % (key, object_type))
 		# ingoing object format:
-		object = copy.deepcopy(old_object)
 		#	'dn': dn
 		#	'modtype': 'add', 'delete', 'modify', 'move'
 		#	'attributes': { attr: [values] }
@@ -1623,154 +1627,168 @@ class ucs(object):
 		#	'attributes': { attr: [values] }
 		#       'olddn' : dn (only on move)
 
-		object_out = {}
-		object_out['attributes'] = {}
-		if object and 'modtype' in object:
-			object_out['modtype'] = object['modtype']
+		if object_type == 'ucs':
+			return self._object_mapping_ucs(key, old_object)
 		else:
-			object_out['modtype'] = ''
+			return self._object_mapping_con(key, old_object)
 
+	def _object_mapping_ucs(self, key, old_object):
+		object = copy.deepcopy(old_object)
 		# DN mapping
-
 		dn_mapping_stored = []
 		for dntype in ['dn', 'olddn']:  # check if all available dn's are already mapped
 			if dntype in object:
-				ud.debug(ud.LDAP, ud.INFO, "_dn_type %s" % (object_type))  # don't send str(object) to debug, may lead to segfaults
-
-				if (object_type == 'ucs' and self._get_dn_by_ucs(object[dntype]) != ''):
+				if self._get_dn_by_ucs(object[dntype]):
 					object[dntype] = self._get_dn_by_ucs(object[dntype])
 					object[dntype] = self.dn_mapped_to_base(object[dntype], self.lo_ad.base)
 					dn_mapping_stored.append(dntype)
-				if (object_type != 'ucs' and self._get_dn_by_con(object[dntype]) != ''):
-					object[dntype] = self._get_dn_by_con(object[dntype])
-					object[dntype] = self.dn_mapped_to_base(object[dntype], self.lo.base)
-					dn_mapping_stored.append(dntype)
 
-		if key in self.property:
-			if hasattr(self.property[key], 'dn_mapping_function'):
-				# DN mapping functions
-				for function in self.property[key].dn_mapping_function:
-					object = function(self, object, dn_mapping_stored, isUCSobject=(object_type == 'ucs'))
+		try:
+			MAPPING = self.property[key]
+		except KeyError:
+			return object
 
-		if object_type == 'ucs':
-			if key in self.property:
-				if hasattr(self.property[key], 'position_mapping'):
-					for dntype in ['dn', 'olddn']:
-						if dntype in object and dntype not in dn_mapping_stored:
-							# save the old rdn with the correct upper and lower case
-							rdn_store = self._get_rdn(object[dntype])
-							for mapping in self.property[key].position_mapping:
-								object[dntype] = self._subtree_replace(object[dntype].lower(), mapping[0].lower(), mapping[1])
+		# DN mapping functions
+		for function in MAPPING.dn_mapping_function:
+			object = function(self, object, dn_mapping_stored, isUCSobject=True)
 
-							if self.lo_ad.base == object[dntype][len(object[dntype]) - len(self.lo_ad.base):] and len(self.lo_ad.base) > len(self.lo.base):
-								ud.debug(ud.LDAP, ud.INFO, "The dn %s is already converted to the AD base, don't do this again." % object[dntype])
-							else:
-								object[dntype] = self._subtree_replace(object[dntype].lower(), self.lo.base.lower(), self.lo_ad.base)  # FIXME: lo_ad may change with other connectors
-							# write the correct upper and lower case back to the DN
-							object[dntype] = object[dntype].replace(object[dntype][0:len(rdn_store)], rdn_store, 1)
-		else:
-			if key in self.property:
-				if hasattr(self.property[key], 'position_mapping'):
-					for dntype in ['dn', 'olddn']:
-						if dntype in object and dntype not in dn_mapping_stored:
-							# save the old rdn with the correct upper and lower case
-							rdn_store = self._get_rdn(object[dntype])
-							for mapping in self.property[key].position_mapping:
-								object[dntype] = self._subtree_replace(object[dntype].lower(), mapping[1].lower(), mapping[0])
-
-							if self.lo.base == object[dntype][len(object[dntype]) - len(self.lo.base):] and len(self.lo.base) > len(self.lo_ad.base):
-								ud.debug(ud.LDAP, ud.INFO, "The dn %s is already converted to the UCS base, don't do this again." % object[dntype])
-							else:
-								object[dntype] = self._subtree_replace(object[dntype].lower(), self.lo_ad.base.lower(), self.lo.base)  # FIXME: lo_ad may change with other connectors
-							# write the correct upper and lower case back to the DN
-							object[dntype] = object[dntype].replace(object[dntype][0:len(rdn_store)], rdn_store, 1)
+		for dntype in ['dn', 'olddn']:
+			if dntype in object and dntype not in dn_mapping_stored:
+				dn_mapped = object[dntype]
+				# note: position_mapping == [] by default
+				for mapping in MAPPING.position_mapping:
+					dn_mapped = self._subtree_replace(dn_mapped, mapping[0], mapping[1])
+				if dn_mapped == object[dntype]:
+					if self.lo_ad.base.lower() == dn_mapped[-len(self.lo_ad.base):].lower() and len(self.lo_ad.base) > len(self.lo.base):
+						ud.debug(ud.LDAP, ud.INFO, "The dn %s is already converted to the AD base, don't do this again." % dn_mapped)
+					else:
+						dn_mapped = self._subtree_replace(object[dntype], self.lo.base, self.lo_ad.base)  # FIXME: lo_ad may change with other connectors
+				object[dntype] = dn_mapped
 
 		object_out = object
 
 		# other mapping
-		if object_type == 'ucs':
-			for attribute, values in object['attributes'].items():
-				for attr_key in self.property[key].attributes.keys():
-					if attribute == self.property[key].attributes[attr_key].ldap_attribute:
-						# mapping function
-						if hasattr(self.property[key].attributes[attr_key], 'mapping'):
-							# direct mapping
-							if self.property[key].attributes[attr_key].mapping[0]:
-								object_out['attributes'][self.property[key].attributes[attr_key].con_attribute] = self.property[key].attributes[attr_key].mapping[0](self, key, object)
+		for attribute, values in list(object['attributes'].items()):
+			for attr_key, attributes in (MAPPING.attributes or {}).items():
+				if attribute.lower() == attributes.ldap_attribute.lower():
+					# mapping function
+					if hasattr(attributes, 'mapping'):
+						if attributes.mapping[0]:
+							object_out['attributes'][attributes.con_attribute] = attributes.mapping[0](self, key, object)
+					# direct mapping
+					else:
+						if attributes.con_other_attribute:
+							object_out['attributes'][attributes.con_attribute] = [values[0]]
+							object_out['attributes'][attributes.con_other_attribute] = values[1:]
 						else:
-							if self.property[key].attributes[attr_key].con_other_attribute:
-								object_out['attributes'][self.property[key].attributes[attr_key].con_attribute] = [values[0]]
-								object_out['attributes'][self.property[key].attributes[attr_key].con_other_attribute] = values[1:]
-							else:
-								object_out['attributes'][self.property[key].attributes[attr_key].con_attribute] = values
+							object_out['attributes'][attributes.con_attribute] = values
+
+					# mapping_table
+					if MAPPING.mapping_table and attr_key in MAPPING.mapping_table.keys():
+						for ucsval, conval in MAPPING.mapping_table[attr_key]:
+							if isinstance(object_out['attributes'][attributes.con_attribute], list):
+
+								ucsval_lower = make_lower(ucsval)
+								objectval_lower = make_lower(object_out['attributes'][attributes.con_attribute])
+
+								if ucsval_lower in objectval_lower:
+									object_out['attributes'][attributes.con_attribute][objectval_lower.index(ucsval_lower)] = conval
+								elif ucsval_lower == objectval_lower:
+									object_out['attributes'][attributes.con_attribute] = conval
+
+			for post_attributes in (MAPPING.post_attributes or {}).values():
+				if attribute.lower() == post_attributes.ldap_attribute.lower():
+					if hasattr(post_attributes, 'mapping'):
+						if post_attributes.mapping[0]:
+							object_out['attributes'][post_attributes.con_attribute] = post_attributes.mapping[0](self, key, object)
+					else:
+						if post_attributes.con_other_attribute:
+							object_out['attributes'][post_attributes.con_attribute] = [values[0]]
+							object_out['attributes'][post_attributes.con_other_attribute] = values[1:]
+						else:
+							object_out['attributes'][post_attributes.con_attribute] = values
+
+		return object_out
+
+	def _object_mapping_con(self, key, old_object):
+		object = copy.deepcopy(old_object)
+
+		# DN mapping
+		dn_mapping_stored = []
+		for dntype in ['dn', 'olddn']:  # check if all available dn's are already mapped
+			if dntype in object:
+				if self._get_dn_by_con(object[dntype]):
+					object[dntype] = self._get_dn_by_con(object[dntype])
+					object[dntype] = self.dn_mapped_to_base(object[dntype], self.lo.base)
+					dn_mapping_stored.append(dntype)
+
+		try:
+			MAPPING = self.property[key]
+		except KeyError:
+			return object
+
+		# DN mapping functions
+		for function in MAPPING.dn_mapping_function:
+			object = function(self, object, dn_mapping_stored, isUCSobject=False)
+
+		for dntype in ['dn', 'olddn']:
+			if dntype in object and dntype not in dn_mapping_stored:
+				dn_mapped = object[dntype]
+				# note: position_mapping == [] by default
+				for mapping in MAPPING.position_mapping:
+					dn_mapped = self._subtree_replace(dn_mapped, mapping[1], mapping[0])
+				if dn_mapped == object[dntype]:
+					if self.lo.base.lower() == dn_mapped[-len(self.lo.base):].lower() and len(self.lo.base) > len(self.lo_ad.base):
+						ud.debug(ud.LDAP, ud.INFO, "The dn %s is already converted to the UCS base, don't do this again." % dn_mapped)
+					else:
+						dn_mapped = self._subtree_replace(dn_mapped, self.lo_ad.base, self.lo.base)  # FIXME: lo_ad may change with other connectors
+				object[dntype] = dn_mapped
+
+		object_out = object
+
+		# other mapping
+		# Filter out Configuration objects w/o DN
+		if object['dn'] is None:
+			return object_out
+
+		for attribute, values in list(object['attributes'].items()):
+			for attr_key, attributes in (MAPPING.attributes or {}).items():
+				if attribute.lower() == attributes.con_attribute.lower():
+					# mapping function
+					if hasattr(attributes, 'mapping'):
+						# direct mapping
+						if attributes.mapping[1]:
+							object_out['attributes'][attributes.ldap_attribute] = attributes.mapping[1](self, key, object)
+					else:
+						if attributes.con_other_attribute and object['attributes'].get(attributes.con_other_attribute):
+							object_out['attributes'][attributes.ldap_attribute] = values + object['attributes'].get(attributes.con_other_attribute)
+						else:
+							object_out['attributes'][attributes.ldap_attribute] = values
 
 						# mapping_table
-						if self.property[key].mapping_table and attr_key in self.property[key].mapping_table.keys():
-							for ucsval, conval in self.property[key].mapping_table[attr_key]:
-								if isinstance(object_out['attributes'][self.property[key].attributes[attr_key].con_attribute], type([])):
+					if MAPPING.mapping_table and attr_key in MAPPING.mapping_table.keys():
+						for ucsval, conval in MAPPING.mapping_table[attr_key]:
+							if isinstance(object_out['attributes'][attributes.con_attribute], list):
 
-									ucsval_lower = make_lower(ucsval)
-									objectval_lower = make_lower(object_out['attributes'][self.property[key].attributes[attr_key].con_attribute])
+								conval_lower = make_lower(conval)
+								objectval_lower = make_lower(object_out['attributes'][attributes.ldap_attribute])
 
-									if ucsval_lower in objectval_lower:
-										object_out['attributes'][self.property[key].attributes[attr_key].con_attribute][objectval_lower.index(ucsval_lower)] = conval
-									elif ucsval_lower == objectval_lower:
-										object_out['attributes'][self.property[key].attributes[attr_key].con_attribute] = conval
+								if conval_lower in objectval_lower:
+									object_out['attributes'][attributes.ldap_attribute][objectval_lower.index(conval_lower)] = ucsval
+								elif conval_lower == objectval_lower:
+									object_out['attributes'][attributes.ldap_attribute] = ucsval
 
-				if hasattr(self.property[key], 'post_attributes') and self.property[key].post_attributes is not None:
-					for attr_key in self.property[key].post_attributes.keys():
-						if attribute == self.property[key].post_attributes[attr_key].ldap_attribute:
-							if hasattr(self.property[key].post_attributes[attr_key], 'mapping'):
-								if self.property[key].post_attributes[attr_key].mapping[0]:
-									object_out['attributes'][self.property[key].post_attributes[attr_key].con_attribute] = self.property[key].post_attributes[attr_key].mapping[0](self, key, object)
-							else:
-								if self.property[key].post_attributes[attr_key].con_other_attribute:
-									object_out['attributes'][self.property[key].post_attributes[attr_key].con_attribute] = [values[0]]
-									object_out['attributes'][self.property[key].post_attributes[attr_key].con_other_attribute] = values[1:]
-								else:
-									object_out['attributes'][self.property[key].post_attributes[attr_key].con_attribute] = values
-
-		else:
-			# Filter out Configuration objects w/o DN
-			if object['dn'] is not None:
-				for attribute, values in object['attributes'].items():
-					for attr_key in self.property[key].attributes.keys():
-						if attribute == self.property[key].attributes[attr_key].con_attribute:
-							# mapping function
-							if hasattr(self.property[key].attributes[attr_key], 'mapping'):
-								# direct mapping
-								if self.property[key].attributes[attr_key].mapping[1]:
-									object_out['attributes'][self.property[key].attributes[attr_key].ldap_attribute] = self.property[key].attributes[attr_key].mapping[1](self, key, object)
-							else:
-								if self.property[key].attributes[attr_key].con_other_attribute and object['attributes'].get(self.property[key].attributes[attr_key].con_other_attribute):
-									object_out['attributes'][self.property[key].attributes[attr_key].ldap_attribute] = values + object['attributes'].get(self.property[key].attributes[attr_key].con_other_attribute)
-								else:
-									object_out['attributes'][self.property[key].attributes[attr_key].ldap_attribute] = values
-
-							# mapping_table
-							if self.property[key].mapping_table and attr_key in self.property[key].mapping_table.keys():
-								for ucsval, conval in self.property[key].mapping_table[attr_key]:
-									if isinstance(object_out['attributes'][self.property[key].attributes[attr_key].con_attribute], type([])):
-
-										conval_lower = make_lower(conval)
-										objectval_lower = make_lower(object_out['attributes'][self.property[key].attributes[attr_key].ldap_attribute])
-
-										if conval_lower in objectval_lower:
-											object_out['attributes'][self.property[key].attributes[attr_key].ldap_attribute][objectval_lower.index(conval_lower)] = ucsval
-										elif conval_lower == objectval_lower:
-											object_out['attributes'][self.property[key].attributes[attr_key].ldap_attribute] = ucsval
-
-					if hasattr(self.property[key], 'post_attributes') and self.property[key].post_attributes is not None:
-						for attr_key in self.property[key].post_attributes.keys():
-							if attribute == self.property[key].post_attributes[attr_key].con_attribute:
-								if hasattr(self.property[key].post_attributes[attr_key], 'mapping'):
-									if self.property[key].post_attributes[attr_key].mapping[1]:
-										object_out['attributes'][self.property[key].post_attributes[attr_key].ldap_attribute] = self.property[key].post_attributes[attr_key].mapping[1](self, key, object)
-								else:
-									if self.property[key].post_attributes[attr_key].con_other_attribute and object['attributes'].get(self.property[key].post_attributes[attr_key].con_other_attribute):
-										object_out['attributes'][self.property[key].post_attributes[attr_key].ldap_attribute] = values + object['attributes'].get(self.property[key].post_attributes[attr_key].con_other_attribute)
-									else:
-										object_out['attributes'][self.property[key].post_attributes[attr_key].ldap_attribute] = values
+			for post_attributes in (MAPPING.post_attributes or {}).values():
+				if attribute.lower() == post_attributes.con_attribute.lower():
+					if hasattr(post_attributes, 'mapping'):
+						if post_attributes.mapping[1]:
+							object_out['attributes'][post_attributes.ldap_attribute] = post_attributes.mapping[1](self, key, object)
+					else:
+						if post_attributes.con_other_attribute and object['attributes'].get(post_attributes.con_other_attribute):
+							object_out['attributes'][post_attributes.ldap_attribute] = values + \
+								object['attributes'].get(post_attributes.con_other_attribute)
+						else:
+							object_out['attributes'][post_attributes.ldap_attribute] = values
 
 		return object_out
 
