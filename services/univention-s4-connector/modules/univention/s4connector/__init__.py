@@ -1622,7 +1622,7 @@ class ucs(object):
 		:param object: a mapped or unmapped S4 or UCS object
 		'''
 		if 'dn' not in object:
-			ud.debug(ud.LDAP, ud.INFO, "_ignore_object: ignore object without DN")
+			ud.debug(ud.LDAP, ud.INFO, "_ignore_object: ignore object without DN (key: {})".format(key))
 			return True  # ignore not existing object
 
 		if self.property.get(key):

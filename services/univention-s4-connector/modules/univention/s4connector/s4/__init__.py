@@ -193,7 +193,7 @@ def s42samba_time(ltime):
 	return int(((ltime - d)) / 10000000)
 
 
-# mapping funtions
+# mapping functions
 def samaccountname_dn_mapping(s4connector, given_object, dn_mapping_stored, ucsobject, propertyname, propertyattrib, ocucs, ucsattrib, ocs4, dn_attr=None):
 	'''
 	map dn of given object (which must have an samaccountname in S4)
