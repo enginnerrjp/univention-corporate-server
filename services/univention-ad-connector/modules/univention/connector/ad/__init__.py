@@ -43,6 +43,7 @@ import calendar
 import pprint
 import string
 import base64
+import subprocess
 
 import six
 from six.moves import urllib_parse
@@ -50,8 +51,13 @@ import ldap
 from ldap.controls import LDAPControl
 from ldap.controls import SimplePagedResultsControl
 from ldap.filter import escape_filter_chars
-from samba.dcerpc import security
+from samba.dcerpc import security, nbt, drsuapi, lsa
 from samba.ndr import ndr_pack, ndr_unpack
+from samba.param import LoadParm
+from samba.net import Net
+from samba.credentials import Credentials, DONT_USE_KERBEROS
+from samba import drs_utils
+import samba.dcerpc.samr
 
 from univention.config_registry import ConfigRegistry
 import univention.uldap
@@ -761,16 +767,6 @@ class ad(univention.connector.ucs):
 		self.ad_ldap_binddn = ad_ldap_binddn
 		self.ad_ldap_bindpw = ad_ldap_bindpw
 		self.ad_ldap_certificate = ad_ldap_certificate
-		self.baseConfig = baseConfig
-
-		self.open_ad()
-
-		# update binary attribute list
-		global BINARY_ATTRIBUTES
-		for attr in self.baseConfig.get('%s/ad/binary_attributes' % self.CONFIGBASENAME, '').split(','):
-			attr = attr.strip()
-			if attr not in BINARY_ATTRIBUTES:
-				BINARY_ATTRIBUTES.append(attr)
 
 		if not self.config.has_section('AD'):
 			ud.debug(ud.LDAP, ud.INFO, "__init__: init add config section 'AD'")
@@ -797,8 +793,16 @@ class ad(univention.connector.ucs):
 		self.creation_list = []
 
 		# Build an internal cache with AD as key and the UCS object as cache
-		self.group_mapping_cache_ucs = {}
-		self.group_mapping_cache_con = {}
+
+		# UCS group member DNs to AD group member DN
+		# * entry used and updated while reading in group_members_sync_from_ucs
+		# * entry flushed during delete+move at in sync_to_ucs and sync_from_ucs
+		self.group_member_mapping_cache_ucs = {}
+
+		# AD group member DNs to UCS group member DN
+		# * entry used and updated while reading in group_members_sync_to_ucs
+		# * entry flushed during delete+move at in sync_to_ucs and sync_from_ucs
+		self.group_member_mapping_cache_con = {}
 
 		# Save the old members of a group
 		# The connector is object based, at least in the direction AD/AD to LDAP, because we don't
@@ -823,52 +827,26 @@ class ad(univention.connector.ucs):
 		# * entry used for decision in group_members_sync_from_ucs
 		self.group_members_cache_con = {}
 
-		if init_group_cache:
-			ud.debug(ud.LDAP, ud.PROCESS, 'Building internal group membership cache')
-			ad_groups = self.__search_ad(filter='(objectClass=group)', attrlist=['member'])
-			ud.debug(ud.LDAP, ud.INFO, "__init__: ad_groups: %s" % ad_groups)
-			for ad_group in ad_groups:
-				if not ad_group or not ad_group[0]:
-					continue
-				ad_group_dn, ad_group_attrs = ad_group
-				group = ad_group_dn.lower()
-				self.group_members_cache_con[group] = set()
-				if ad_group_attrs:
-					ad_members = self.get_ad_members(ad_group_dn, ad_group_attrs)
-					self.group_members_cache_con[group].update(m.lower() for m in ad_members)
-			ud.debug(ud.LDAP, ud.INFO, "__init__: self.group_members_cache_con: %s" % self.group_members_cache_con)
+	def init_ldap_connections(self):
+		super(ad, self).init_ldap_connections()
+		if self._debug_level >= 4:
+			ud.debug(ud.LDAP, ud.ALL, 'Mapping is: %s' % (pprint.pformat(self.property, indent=4, width=250)))
 
-			ucs_groups = self.search_ucs(filter='(objectClass=univentionGroup)', attr=['uniqueMember'])
-			for ucs_group in ucs_groups:
-				group = ucs_group[0].lower()
-				self.group_members_cache_ucs[group] = set()
-				if ucs_group[1]:
-					for member in ucs_group[1].get('uniqueMember'):
-						self.group_members_cache_ucs[group].add(member.lower())
-			ud.debug(ud.LDAP, ud.INFO, "__init__: self.group_members_cache_ucs: %s" % self.group_members_cache_ucs)
-
-			ud.debug(ud.LDAP, ud.PROCESS, 'Internal group membership cache was created')
+		self.open_ad()
+		self.ad_sid = decode_sid(self.ad_search_ext_s(self.ad_ldap_base, ldap.SCOPE_BASE, 'objectclass=domain', ['objectSid'])[0][1]['objectSid'][0])
 
 		if self.lo_ad.binddn:
 			try:
 				result = self.lo_ad.search(base=self.lo_ad.binddn, scope='base')
-				self.ad_ldap_bind_username = result[0][1]['sAMAccountName'][0]
-			except Exception as msg:
+				self.ad_ldap_bind_username = result[0][1]['sAMAccountName'][0].decode('ASCII')
+			except ldap.LDAPError as msg:
 				print("Failed to get SID from AD: %s" % msg)
 				sys.exit(1)
 		else:
-			self.ad_ldap_bind_username = self.baseConfig['%s/ad/ldap/binddn' % self.CONFIGBASENAME]
-
-		try:
-			result = self.lo_ad.search(filter='(objectclass=domain)', base=ad_ldap_base, scope='base', attr=['objectSid'])
-			object_sid = result[0][1]['objectSid'][0]
-			self.ad_sid = univention.connector.ad.decode_sid(object_sid)
-		except Exception as msg:
-			print("Failed to get SID from AD: %s" % msg)
-			sys.exit(1)
+			self.ad_ldap_bind_username = self.configRegistry['%s/ad/ldap/binddn' % self.CONFIGBASENAME]
 
 		# Get NetBios Domain Name
-		self.ad_netbios_domainname = self.baseConfig.get('%s/ad/netbiosdomainname' % self.CONFIGBASENAME, None)
+		self.ad_netbios_domainname = self.configRegistry.get('%s/ad/netbiosdomainname' % self.CONFIGBASENAME, None)
 		if not self.ad_netbios_domainname:
 			lp = LoadParm()
 			net = Net(creds=None, lp=lp)
@@ -883,6 +861,9 @@ class ad(univention.connector.ucs):
 
 		ud.debug(ud.LDAP, ud.PROCESS, 'Using %s as AD Netbios domain name' % self.ad_netbios_domainname)
 
+		for prop in self.property.values():
+			prop.con_default_dn = self.dn_mapped_to_base(prop.con_default_dn, self.lo_ad.base)
+
 		# Lookup list of single value attributes from AD DC Schema
 		schema_base = "CN=Schema,CN=Configuration,%s" % self.ad_ldap_base
 		try:
@@ -893,7 +874,7 @@ class ad(univention.connector.ucs):
 			print(error_msg)
 			sys.exit(1)
 
-		self.single_valued_ad_attributes = [record[1]['lDAPDisplayName'][0] for record in result]
+		self.single_valued_ad_attributes = [record[1]['lDAPDisplayName'][0].decode('UTF-8') for record in result]
 
 		# Flag single value attributes as such in the connector mapping
 		for mapping_key, mapping_property in self.property.items():
@@ -958,8 +939,7 @@ class ad(univention.connector.ucs):
 		self.drs = None
 		self.samr = None
 
-		self.profiling = self.baseConfig.is_true('%s/ad/poll/profiling' % self.CONFIGBASENAME, False)
-
+		self.profiling = self.configRegistry.is_true('%s/ad/poll/profiling' % self.CONFIGBASENAME, False)
 
 	def open_drs_connection(self):
 		lp = LoadParm()
@@ -1002,10 +982,10 @@ class ad(univention.connector.ucs):
 		creds.set_username(self.ad_ldap_bind_username)
 		creds.set_password(self.lo_ad.bindpw)
 
-		binding_options = "\pipe\samr"
+		binding_options = r"\pipe\samr"
 		binding = "ncacn_np:%s[%s]" % (self.ad_ldap_host, binding_options)
 
-		self.samr = samba.dcerpc.samr.samr(binding, lp, creds)
+		self.samr = samba.dcerpc.samr.samr(binding.encode('UTF-8'), lp, creds)
 		handle = self.samr.Connect2(None, security.SEC_FLAG_MAXIMUM_ALLOWED)
 
 		sam_domain = lsa.String()
@@ -1016,48 +996,77 @@ class ad(univention.connector.ucs):
 	def get_kerberos_ticket(self):
 		p1 = subprocess.Popen(['kdestroy', ], close_fds=True)
 		p1.wait()
-		cmd_block = ['kinit', '--no-addresses', '--password-file=%s' % self.baseConfig['%s/ad/ldap/bindpw' % self.CONFIGBASENAME], self.baseConfig['%s/ad/ldap/binddn' % self.CONFIGBASENAME]]
+		cmd_block = ['kinit', '--no-addresses', '--password-file=%s' % self.configRegistry['%s/ad/ldap/bindpw' % self.CONFIGBASENAME], self.configRegistry['%s/ad/ldap/binddn' % self.CONFIGBASENAME]]
 		p1 = subprocess.Popen(cmd_block, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, close_fds=True)
 		stdout, stderr = p1.communicate()
 		if p1.returncode != 0:
-			raise kerberosAuthenticationFailed('The following command failed: "%s" (%s): %s' % (' '.join(cmd_block), p1.returncode, stdout))
+			raise kerberosAuthenticationFailed('The following command failed: "%s" (%s): %s' % (' '.join(cmd_block), p1.returncode, stdout.decode('UTF-8', 'replace')))
+
+	def init_group_cache(self):
+		ud.debug(ud.LDAP, ud.PROCESS, 'Building internal group membership cache')
+		ad_groups = self.__search_ad(filter='objectClass=group', attrlist=['member'])
+		ud.debug(ud.LDAP, ud.ALL, "__init__: ad_groups: %s" % ad_groups)
+		for ad_group in ad_groups:
+			if not ad_group or not ad_group[0]:
+				continue
+
+			ad_group_dn, ad_group_attrs = ad_group
+			self.group_members_cache_con[ad_group_dn.lower()] = set()
+			if ad_group_attrs:
+				ad_members = self.get_ad_members(ad_group_dn, ad_group_attrs)
+				member_cache = self.group_members_cache_con[ad_group_dn.lower()]
+				member_cache.update(m.lower() for m in ad_members)
+
+		ud.debug(ud.LDAP, ud.ALL, "__init__: self.group_members_cache_con: %s" % self.group_members_cache_con)
+
+		for ucs_group in self.search_ucs(filter='objectClass=univentionGroup', attr=['uniqueMember']):
+			group_lower = ucs_group[0].lower()
+			self.group_members_cache_ucs[group_lower] = set()
+			if ucs_group[1]:
+				for member in ucs_group[1].get('uniqueMember'):
+					self.group_members_cache_ucs[group_lower].add(member.decode('UTF-8').lower())
+		ud.debug(ud.LDAP, ud.INFO, "__init__: self.group_members_cache_ucs: %s" % self.group_members_cache_ucs)
+		ud.debug(ud.LDAP, ud.PROCESS, 'Internal group membership cache was created')
+
+	def ad_search_ext_s(self, *args, **kwargs):
+		return fix_dn_in_search(self.lo_ad.lo.search_ext_s(*args, **kwargs))
 
 	def open_ad(self):
-		tls_mode = 2
-		if '%s/ad/ldap/ssl' % self.CONFIGBASENAME in self.configRegistry and self.configRegistry['%s/ad/ldap/ssl' % self.CONFIGBASENAME] == "no":
-			ud.debug(ud.LDAP, ud.INFO, "__init__: The LDAP connection to AD does not use SSL (switched off by UCR \"%s/ad/ldap/ssl\")." % self.CONFIGBASENAME)
-			tls_mode = 0
-		ldaps = self.baseConfig.is_true('%s/ad/ldap/ldaps' % self.CONFIGBASENAME, False)  # tls or ssl
+		tls_mode = 2 if self.configRegistry.is_true('%s/ad/ldap/ssl' % self.CONFIGBASENAME, True) else 0
+		ldaps = self.configRegistry.is_true('%s/ad/ldap/ldaps' % self.CONFIGBASENAME, False)  # tls or ssl
+
+		#protocol = self.configRegistry.get('%s/ad/ldap/protocol' % self.CONFIGBASENAME, 'ldap').lower()
+		#if protocol == 'ldapi':
+		#	socket = urllib_parse.quote(self.configRegistry.get('%s/ad/ldap/socket' % self.CONFIGBASENAME, ''), '')
+		#	ldapuri = "%s://%s" % (protocol, socket)
+		#else:
+		#	ldapuri = "%s://%s:%d" % (protocol, self.configRegistry['%s/ad/ldap/host' % self.CONFIGBASENAME], int(self.configRegistry['%s/ad/ldap/port' % self.CONFIGBASENAME]))
 
 		# Determine ad_ldap_base with exact case
 		try:
 			self.lo_ad = univention.uldap.access(
 				host=self.ad_ldap_host, port=int(self.ad_ldap_port),
 				base='', binddn=None, bindpw=None, start_tls=tls_mode,
-				use_ldaps=ldaps, ca_certfile=self.ad_ldap_certificate)
-			default_naming_context = self._get_from_root_dse(['defaultNamingContext'])
-			self.ad_ldap_base = default_naming_context['defaultNamingContext'][0]
-		except Exception as ex:
-			ud.debug(ud.LDAP, ud.ERROR, 'Failed to lookup AD LDAP base, using UCR value: %s' % ex)
+				use_ldaps=ldaps, ca_certfile=self.ad_ldap_certificate,
+				#uri=ldapuri,
+			)
+			self.ad_ldap_base = self.ad_search_ext_s('', ldap.SCOPE_BASE, 'objectclass=*', ['defaultNamingContext'])[0][1]['defaultNamingContext'][0].decode('UTF-8')
+		except Exception:  # FIXME: which exception is to be caught
+			self._debug_traceback(ud.ERROR, 'Failed to lookup AD LDAP base, using UCR value.')
 
-		if self.baseConfig.is_true('%s/ad/ldap/kerberos' % self.CONFIGBASENAME):
+		if self.configRegistry.is_true('%s/ad/ldap/kerberos' % self.CONFIGBASENAME):
 			os.environ['KRB5CCNAME'] = '/var/cache/univention-ad-connector/krb5.cc'
 			self.get_kerberos_ticket()
 			auth = ldap.sasl.gssapi("")
-			self.lo_ad = univention.uldap.access(host=self.ad_ldap_host, port=int(self.ad_ldap_port), base=self.ad_ldap_base, binddn=None, bindpw=self.ad_ldap_bindpw, start_tls=tls_mode, use_ldaps=ldaps, ca_certfile=self.ad_ldap_certificate, decode_ignorelist=BINARY_ATTRIBUTES)
+			self.lo_ad = univention.uldap.access(host=self.ad_ldap_host, port=int(self.ad_ldap_port), base=self.ad_ldap_base, binddn=None, bindpw=self.ad_ldap_bindpw, start_tls=tls_mode, use_ldaps=ldaps, ca_certfile=self.ad_ldap_certificate)
 			self.get_kerberos_ticket()
 			self.lo_ad.lo.sasl_interactive_bind_s("", auth)
 		else:
-			self.lo_ad = univention.uldap.access(host=self.ad_ldap_host, port=int(self.ad_ldap_port), base=self.ad_ldap_base, binddn=self.ad_ldap_binddn, bindpw=self.ad_ldap_bindpw, start_tls=tls_mode, use_ldaps=ldaps, ca_certfile=self.ad_ldap_certificate, decode_ignorelist=BINARY_ATTRIBUTES)
+			self.lo_ad = univention.uldap.access(host=self.ad_ldap_host, port=int(self.ad_ldap_port), base=self.ad_ldap_base, binddn=self.ad_ldap_binddn, bindpw=self.ad_ldap_bindpw, start_tls=tls_mode, use_ldaps=ldaps, ca_certfile=self.ad_ldap_certificate)
 
 		self.lo_ad.lo.set_option(ldap.OPT_REFERRALS, 0)
 
-	# encode string to unicode
-	def encode(self, string):
-		try:
-			return unicode(string)
-		except:  # FIXME: which exception is to be caught?
-			return unicode(string, 'Latin-1')
+		self.ad_ldap_partitions = (self.ad_ldap_base,)
 
 	def _get_lastUSN(self):
 		return max(self.__lastUSN, int(self._get_config_option('AD', 'lastUSN')))
@@ -1125,7 +1134,7 @@ class ad(univention.connector.ucs):
 
 	def parse_range_retrieval_attrs(self, ad_attrs, attr):
 		for k in ad_attrs:
-			m = self.range_retrieval_pattern.match(k)
+			m = self.RANGE_RETRIEVAL_PATTERN.match(k)
 			if not m or m.group(1) != attr:
 				continue
 
@@ -1192,6 +1201,19 @@ class ad(univention.connector.ucs):
 		usncreated = int(samba_object['attributes'].get('uSNCreated', [b'0'])[0])
 		usnchanged = int(samba_object['attributes'].get('uSNChanged', [b'0'])[0])
 		return max(usnchanged, usncreated)
+
+	def __search_ad_partitions(self, scope=ldap.SCOPE_SUBTREE, filter='', attrlist=[], show_deleted=False):
+		'''
+		search ad across all partitions listed in self.ad_ldap_partitions
+		'''
+		res = []
+		for base in self.ad_ldap_partitions:
+			res += self.__search_ad(base, scope, filter, attrlist, show_deleted)
+
+		return res
+
+	def __get_ad_deleted(self, dn):
+		return self.__search_ad(dn, scope=ldap.SCOPE_BASE, filter='(objectClass=*)', show_deleted=True)[0]
 
 	def __search_ad(self, base=None, scope=ldap.SCOPE_SUBTREE, filter='', attrlist=[], show_deleted=False):
 		'''
