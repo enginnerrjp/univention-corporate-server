@@ -46,13 +46,12 @@ import base64
 import subprocess
 
 import six
-from six.moves import urllib_parse
 import ldap
 from ldap.controls import LDAPControl
 from ldap.controls import SimplePagedResultsControl
 from ldap.filter import escape_filter_chars
 from samba.dcerpc import security, nbt, drsuapi, lsa
-from samba.ndr import ndr_pack, ndr_unpack
+from samba.ndr import ndr_unpack
 from samba.param import LoadParm
 from samba.net import Net
 from samba.credentials import Credentials, DONT_USE_KERBEROS
@@ -333,8 +332,6 @@ def windowscomputer_dn_mapping(connector, given_object, dn_mapping_stored, isUCS
 	return samaccountname_dn_mapping(connector, given_object, dn_mapping_stored, isUCSobject, 'windowscomputer', u'samAccountName', u'posixAccount', 'uid', u'computer', 'cn')
 
 
-
-
 def decode_sid(value):
 	return str(ndr_unpack(security.dom_sid, value))
 
@@ -349,17 +346,6 @@ def __is_int(value):
 		return True
 	except (ValueError, TypeError):
 		return False
-
-
-
-		else:
-
-
-
-
-
-
-
 
 
 class LDAPEscapeFormatter(string.Formatter):
@@ -2249,6 +2235,9 @@ class ad(univention.connector.ucs):
 			if self.property[property_type].con_create_attributes:
 				addlist += self.property[property_type].con_create_attributes
 
+			# Copy the LDAP controls, because they may be modified
+			# in an ucs_create_extenstions
+			ctrls = copy.deepcopy(self.serverctrls_for_add_and_modify)
 			if hasattr(self.property[property_type], 'attributes') and self.property[property_type].attributes is not None:
 				for attr, value in object['attributes'].items():
 					for attr_key in self.property[property_type].attributes.keys():
