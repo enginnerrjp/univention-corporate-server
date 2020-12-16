@@ -538,12 +538,12 @@ class ucs(object):
 	def _get_config_items(self, section):
 		return self.config.items(section)
 
-	def _save_rejected_ucs(self, filename, dn):
-		unicode_dn = univention.connector.ad.encode_attrib(dn)
-		self._set_config_option('UCS rejected', filename, unicode_dn)
-
-	def _get_rejected_ucs(self, filename):
-		return self._get_config_option('UCS rejected', filename)
+	def _save_rejected_ucs(self, filename, dn, resync=True, reason=''):
+		if not resync:
+			# Note that unescaped <> are invalid in DNs. See also:
+			# `_list_rejected_ucs()`.
+			dn = '<NORESYNC{}:{}>;{}'.format('=' + reason if reason else '', os.path.basename(filename), dn)
+		self._set_config_option('UCS rejected', filename, dn)
 
 	def _remove_rejected_ucs(self, filename):
 		self._remove_config_option('UCS rejected', filename)
@@ -681,7 +681,7 @@ class ucs(object):
 
 		if not new:
 			change_type = "delete"
-			ud.debug(ud.LDAP, ud.INFO, "__sync_file_from_ucs: objected was deleted")
+			ud.debug(ud.LDAP, ud.INFO, "__sync_file_from_ucs: object was deleted")
 		else:
 			entryUUID = new.get('entryUUID', [b''])[0].decode('ASCII')
 			if entryUUID:
@@ -753,8 +753,9 @@ class ucs(object):
 				object['olddn'] = old_dn  # needed for correct samaccount-mapping
 
 			if not self._ignore_object(key, object) or ignore_subtree_match:
-				premapped_ucs_dn = object['dn']
-				object = self._object_mapping(key, object, 'ucs')
+				pre_mapped_ucs_dn = object['dn']
+				# NOTE: pre_mapped_ucs_dn means: original ucs_dn (i.e. before _object_mapping)
+				mapped_object = self._object_mapping(key, object, 'ucs')
 				if not self._ignore_object(key, object) or ignore_subtree_match:
 					ud.debug(ud.LDAP, ud.INFO, "__sync_file_from_ucs: finished mapping")
 
@@ -769,8 +770,7 @@ class ucs(object):
 						object_old = {'dn': object['dn'], 'modtype': change_type, 'attributes': {}}  # Dummy
 
 					try:
-						if ((old_dn and not self.sync_from_ucs(key, object, premapped_ucs_dn, unicode(old_dn, 'utf8'), object_old))
-							or (not old_dn and not self.sync_from_ucs(key, object, premapped_ucs_dn, old_dn, object_old))):
+						if not self.sync_from_ucs(key, mapped_object, pre_mapped_ucs_dn, old_dn, old, new):
 							self._save_rejected_ucs(filename, dn)
 							return False
 						else:
@@ -1084,48 +1084,47 @@ class ucs(object):
 						else:
 							ud.debug(ud.LDAP, ud.WARN, '__set_values: The attributes for %s have not been removed as it represents a mandatory attribute' % ucs_key)
 
-		for attribute in self.property[property_type].attributes.values():
-			if attribute.sync_mode in ['read', 'sync']:
-				changed_attributes = object.get('changed_attributes', [])
-				changed = not changed_attributes or \
-					attribute.con_attribute in changed_attributes or \
-					attribute.con_other_attribute in changed_attributes or \
-					attribute.con_depends in changed_attributes
+		MAPPING = self.property[property_type]
+		for attributes in MAPPING.attributes.values():
+			if attributes.sync_mode not in ['read', 'sync']:
+				continue
 
-				if changed or modtype == 'add':
-					ud.debug(ud.LDAP, ud.INFO,
-						'__set_values: Set: %s' % attribute.con_attribute)
-					set_values(attribute)
-				else:
-					ud.debug(ud.LDAP, ud.INFO,
-						'__set_values: Skip: %s' % attribute.con_attribute)
+			con_attribute = attributes.con_attribute
+			con_other_attribute = attributes.con_other_attribute
+
+			changed_attributes = object.get('changed_attributes')
+			changed = not changed_attributes or con_attribute in changed_attributes or (con_other_attribute and con_other_attribute in changed_attributes) or attribute.con_depends in changed_attributes
+
+			if changed or modtype == 'add':
+				ud.debug(ud.LDAP, ud.INFO, '__set_values: Set: %s' % con_attribute)
+				set_values(attributes)
+			else:
+				ud.debug(ud.LDAP, ud.INFO, '__set_values: Skip: %s' % con_attribute)
 
 		# post-values
-		if not self.property[property_type].post_attributes:
+		if not MAPPING.post_attributes:
 			return
-		for attribute in self.property[property_type].post_attributes.values():
-			if attribute.sync_mode in ['read', 'sync']:
-				ud.debug(ud.LDAP, ud.INFO,
-					'__set_values: mapping for attribute: %s' % attribute)
-				changed_attributes = object.get('changed_attributes', [])
-				changed = not changed_attributes or \
-					attribute.con_attribute in changed_attributes or \
-					attribute.con_other_attribute in changed_attributes or \
-					attribute.con_depends in changed_attributes
+		for attr_key, post_attributes in MAPPING.post_attributes.items():
+			ud.debug(ud.LDAP, ud.INFO, '__set_values: mapping for attribute: %s' % attr_key)
+			if post_attributes.sync_mode not in ['read', 'sync']:
+				continue
 
-				if changed or modtype == 'add':
-					ud.debug(ud.LDAP, ud.INFO,
-						'__set_values: Set: %s' % attribute.con_attribute)
-					if attribute.reverse_attribute_check:
-						if object['attributes'].get(attribute.ldap_attribute):
-							set_values(attribute)
-						else:
-							ucs_object[attribute.ucs_attribute] = ''
+			con_attribute = post_attributes.con_attribute
+			con_other_attribute = post_attributes.con_other_attribute
+
+			changed_attributes = object.get('changed_attributes')
+
+			if not changed_attributes or con_attribute in changed_attributes or (con_other_attribute and con_other_attribute in changed_attributes):
+				ud.debug(ud.LDAP, ud.INFO, '__set_values: Set: %s' % con_attribute)
+				if post_attributes.reverse_attribute_check:
+					if object['attributes'].get(post_attributes.ldap_attribute):
+						set_values(post_attributes)
 					else:
-						set_values(attribute)
+						ucs_object[post_attributes.ucs_attribute] = ''
 				else:
-					ud.debug(ud.LDAP, ud.INFO,
-						'__set_values: Skip: %s' % attribute.con_attribute)
+					set_values(post_attributes)
+			else:
+				ud.debug(ud.LDAP, ud.INFO, '__set_values: Skip: %s' % con_attribute)
 
 	def add_in_ucs(self, property_type, object, module, position):
 
@@ -1236,45 +1235,73 @@ class ucs(object):
 		if objectGUID:
 			objectGUID = decode_guid(objectGUID)
 		entryUUID = self._get_entryUUID(object['dn'])
-		try:
-			ucs_object.open()
-			ucs_object.remove()
-			self.update_deleted_cache_after_removal(entryUUID, objectGUID)
-			return True
-		except Exception as e:
-			ud.debug(ud.LDAP, ud.INFO, "delete object exception: %s" % e)
-			if str(e) == "Operation not allowed on non-leaf":  # need to delete subtree
-				ud.debug(ud.LDAP, ud.INFO, "remove object from UCS failed, need to delete subtree")
-				for result in self.search_ucs(base=object['dn']):
-					if compare_lowercase(result[0], object['dn']):
-						continue
-					ud.debug(ud.LDAP, ud.INFO, "delete: %s" % result[0])
-					subobject = {'dn': result[0], 'modtype': 'delete', 'attributes': result[1]}
-					key = None
-					for k in self.property.keys():
-						if self.modules[k].identify(result[0], result[1]):
-							key = k
-							break
-					object_mapping = self._object_mapping(key, subobject, 'ucs')
-					ud.debug(ud.LDAP, ud.WARN, "delete subobject: %s" % object_mapping['dn'])
-					if not self._ignore_object(key, object_mapping):
-						if not self.sync_to_ucs(key, subobject, object_mapping['dn'], object):
-							try:
-								ud.debug(ud.LDAP, ud.WARN, "delete of subobject failed: %s" % result[0])
-							except (ldap.SERVER_DOWN, SystemExit):
-								raise
-							except:  # FIXME: which exception is to be caught?
-								ud.debug(ud.LDAP, ud.WARN, "delete of subobject failed")
-							return False
 
-				return delete_in_ucs(property_type, object, module, position)
-			elif str(e) == "noObject":  # already deleted #TODO: check if it's really match
+		if property_type in ['ou', 'container']:
+			if objectGUID and self.was_objectGUID_deleted_by_ucs(objectGUID):
+				ud.debug(ud.LDAP, ud.PROCESS, "delete_in_ucs: object %s already deleted in UCS, ignoring delete" % object['dn'])
 				return True
-			else:
-				raise
+		try:
+			ucs_object = univention.admin.objects.get(module, None, self.lo, dn=object['dn'], position='')
+		except univention.admin.uexceptions.noObject:
+			raise  # object is already removed... TODO: enable if wanted!
+			return True
 
-	def sync_to_ucs(self, property_type, object, premapped_ad_dn, original_object, retry=True):
-		# this function gets an object from the ad class, which should be converted into a ucs modul
+		ucs_object.open()
+
+		try:
+			try:
+				ucs_object.remove()
+				self.update_deleted_cache_after_removal(entryUUID, objectGUID)
+				return True
+			except univention.admin.uexceptions.ldapError as exc:
+				if isinstance(exc.original_exception, ldap.NOT_ALLOWED_ON_NONLEAF):
+					raise exc.original_exception
+				raise
+		except ldap.NOT_ALLOWED_ON_NONLEAF:
+			ud.debug(ud.LDAP, ud.INFO, "remove object from UCS failed, need to delete subtree")
+			if self._remove_subtree_in_ucs(object):
+				# FIXME: endless recursion if there is one subtree-object which is ignored, not identifyable or can't be removed.
+				return self.delete_in_ucs(property_type, object, module, position)
+			return False
+
+	def _remove_subtree_in_ucs(self, parent_ucs_object):
+		for subdn, subattr in self.search_ucs(base=parent_ucs_object['dn'], attr=['*', '+']):
+			if self.lo.compare_dn(subdn.lower(), parent_ucs_object['dn'].lower()):  # TODO: search with scope=children and remove this check
+				continue
+
+			ud.debug(ud.LDAP, ud.INFO, "delete: %r" % (subdn,))
+
+			key = self.identify_udm_object(subdn, subattr)
+			subobject_ucs = {'dn': subdn, 'modtype': 'delete', 'attributes': subattr}
+			back_mapped_subobject = self._object_mapping(key, subobject_ucs, 'ucs')
+			ud.debug(ud.LDAP, ud.WARN, "delete subobject: %r" % (back_mapped_subobject['dn'],))
+
+			if not self._ignore_object(key, back_mapped_subobject):
+				# FIXME: this call is wrong!: sync_to_ucs() must be called with a samba_object not with a ucs_object!
+				if not self.sync_to_ucs(key, subobject_ucs, back_mapped_subobject['dn'], parent_ucs_object):
+					ud.debug(ud.LDAP, ud.WARN, "delete of subobject failed: %r" % (subdn,))
+					return False
+		return True
+
+	def sync_to_ucs(self, property_type, object, pre_mapped_ad_dn, original_object):
+		"""
+		Synchronize an object from AD-LDAP to UCS Open-LDAP.
+
+		:param property_type:
+			the type of the object to be synced, must be part of the mapping. (e.g. "user", "group", "dc", "windowscomputer", etc.)
+		:param object:
+			A dictionary describing the AD object.
+			modtype: A modification type ("add", "modify", "move", "delete")
+			dn: The DN of the object in the UCS-LDAP
+			olddn: The olddn of the object object in UCS-LDAP (e.g. on "move" operation)
+		:ptype object: dict
+		:param pre_mapped_ad_dn:
+			pass
+		:param original_object:
+			pass
+		"""
+		# NOTE: pre_mapped_ad_dn means: original ad_dn (i.e. before _object_mapping)
+		# this function gets an object from the ad class, which should be converted into a ucs module
 
 		# if sync is write (sync to AD) or none, there is nothing to do
 		if not property_type or self.property[property_type].sync_mode in ['write', 'none']:
@@ -1350,24 +1377,24 @@ class ucs(object):
 
 			if object['modtype'] == 'add':
 				result = self.add_in_ucs(property_type, object, module, position)
-				self._check_dn_mapping(object['dn'], premapped_ad_dn)
+				self._check_dn_mapping(object['dn'], pre_mapped_ad_dn)
 				self.adcache.add_entry(guid, original_object.get('attributes'))
 			if object['modtype'] == 'delete':
 				if not old_object:
-					ud.debug(ud.LDAP, ud.WARN, "Object to delete doesn't exsist, ignore (%s)" % object['dn'])
+					ud.debug(ud.LDAP, ud.WARN, "Object to delete doesn't exists, ignore (%r)" % object['dn'])
 					result = True
 				else:
 					result = self.delete_in_ucs(property_type, object, module, position)
-				self._remove_dn_mapping(object['dn'], premapped_ad_dn)
+				self._remove_dn_mapping(object['dn'], pre_mapped_ad_dn)
 				self.adcache.remove_entry(guid)
 			if object['modtype'] == 'move':
 				result = self.move_in_ucs(property_type, object, module, position)
 				self._remove_dn_mapping(object['olddn'], '')  # we don't know the old ad-dn here anymore, will be checked by remove_dn_mapping
-				self._check_dn_mapping(object['dn'], premapped_ad_dn)
+				self._check_dn_mapping(object['dn'], pre_mapped_ad_dn)
 
 			if object['modtype'] == 'modify':
 				result = self.modify_in_ucs(property_type, object, module, position)
-				self._check_dn_mapping(object['dn'], premapped_ad_dn)
+				self._check_dn_mapping(object['dn'], pre_mapped_ad_dn)
 				self.adcache.add_entry(guid, original_object.get('attributes'))
 
 			if not result:
@@ -1395,8 +1422,8 @@ class ucs(object):
 			self._debug_traceback(ud.ERROR, "Unknown Exception during sync_to_ucs")
 			return False
 
-	def sync_from_ucs(self, property_type, object, pre_mapped_ucs_dn, old_dn=None, object_old=None):
-		# dummy
+	def sync_from_ucs(self, property_type, object, pre_mapped_ucs_dn, old_dn=None, old_ucs_object=None, new_ucs_object=None):
+		# dummy: implemented in ad/__init__.py
 		return False
 
 	# internal functions
@@ -1549,6 +1576,9 @@ class ucs(object):
 	def _ignore_object(self, key, object):
 		'''
 		parse if object should be ignored because of ignore_subtree or ignore_filter
+
+		:param key: the property_type from the mapping
+		:param object: a mapped or unmapped AD or UCS object
 		'''
 		if 'dn' not in object:
 			ud.debug(ud.LDAP, ud.INFO, "_ignore_object: ignore object without DN (key: {})".format(key))
@@ -1571,24 +1601,31 @@ class ucs(object):
 		return False
 
 	def _object_mapping(self, key, old_object, object_type='con'):
+		"""Create a mapped object from AD or UCS object definition.
+
+		:param key:
+			the mapping key
+		:param old_object:
+			the object definition in univention directory listener style
+		:ptype old_object: dict
+		:param object_type:
+			"con" if `old_object` is a AD object.
+			"ucs" if `old_object` is a UCS object.
+		:ptype object_type: str
+		"""
 		ud.debug(ud.LDAP, ud.INFO, "_object_mapping: map with key %s and type %s" % (key, object_type))
+		# ingoing object format:
 		object = copy.deepcopy(old_object)
-		# Eingehendes Format object:
 		#	'dn': dn
 		#	'modtype': 'add', 'delete', 'modify', 'move'
 		#	'attributes': { attr: [values] }
-		#       'olddn' : dn (nur bei move)
-		# Ausgehendes Format object_out:
+		#       'olddn' : dn (only on move)
+		# outgoing object format:
 		#	'dn': dn
 		#	'modtype':  'add', 'delete', 'modify', 'move'
 		#	'attributes': { attr: [values] }
-		#       'olddn' : dn (nur bei move)
+		#       'olddn' : dn (only on move)
 
-		# sync mode
-		# dn mapping
-		# ignore_filter
-		# attributes
-		# post_attributes
 		object_out = {}
 		object_out['attributes'] = {}
 		if object and 'modtype' in object:
@@ -1739,3 +1776,12 @@ class ucs(object):
 										object_out['attributes'][self.property[key].post_attributes[attr_key].ldap_attribute] = values
 
 		return object_out
+
+	def identify_udm_object(self, dn, attrs):
+		"""Get the type of the specified UCS object"""
+		for k in self.property.keys():
+			if self.modules[k].identify(dn, attrs):
+				return k
+			for m in self.modules_others.get(k, []):
+				if m and m.identify(dn, attrs):
+					return k
