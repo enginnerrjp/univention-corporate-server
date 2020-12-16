@@ -33,37 +33,30 @@
 
 
 from __future__ import print_function
-import string
-import ldap
-import sys
-import base64
-import time
+
 import os
 import copy
-import types
 import re
-import array
-import ldap.sasl
-import subprocess
-import univention.uldap
-import univention.connector
-import univention.debug2 as ud
+import sys
+import time
+import calendar
+import pprint
+import string
+import base64
+
+import six
+from six.moves import urllib_parse
+import ldap
 from ldap.controls import LDAPControl
 from ldap.controls import SimplePagedResultsControl
 from ldap.filter import escape_filter_chars
-from samba.dcerpc import nbt
-from samba.param import LoadParm
-from samba.net import Net
-from samba.credentials import Credentials, DONT_USE_KERBEROS
-from samba import drs_utils
-from samba.dcerpc import drsuapi, lsa, security
-import samba.dcerpc.samr
-from tempfile import NamedTemporaryFile
+from samba.dcerpc import security
+from samba.ndr import ndr_pack, ndr_unpack
 
-
-class kerberosAuthenticationFailed(Exception):
-	pass
-
+from univention.config_registry import ConfigRegistry
+import univention.uldap
+import univention.connector
+import univention.debug2 as ud
 
 class netbiosDomainnameNotFound(Exception):
 	pass
