@@ -424,18 +424,21 @@ class property(object):
 		self.mapping_table = mapping_table
 		self.position_mapping = position_mapping
 
+	def __repr__(self):
+		return 'univention.connector.property(**%s)' % (pprint.pformat(dict(self.__dict__), indent=4, width=250),)
 
-class ucs:
 
-	def __init__(self, CONFIGBASENAME, _property, baseConfig, listener_dir):
+class ucs(object):
+
+	def __init__(self, CONFIGBASENAME, _property, configRegistry, listener_dir, logfilename, debug_level):
 
 		self.CONFIGBASENAME = CONFIGBASENAME
 
-		self.ucs_no_recode = ['krb5Key', 'userPassword', 'pwhistory', 'sambaNTPassword', 'sambaLMPassword', 'userCertificate;binary']
+		self.configRegistry = configRegistry
+		self.property = _property  # this is the mapping!
 
-		self.baseConfig = baseConfig
-		self.property = _property
-
+		self._logfile = logfilename or '/var/log/univention/%s-ad.log' % self.CONFIGBASENAME
+		self._debug_level = debug_level or int(self.configRegistry.get('%s/debug/level' % self.CONFIGBASENAME, ud.PROCESS))
 		self.init_debug()
 
 		self.listener_dir = listener_dir
@@ -446,23 +449,18 @@ class ucs:
 		adcachedbfile = '/etc/univention/%s/adcache.sqlite' % self.CONFIGBASENAME
 		self.adcache = ADCache(adcachedbfile)
 
-		lockingdbfile = '/etc/univention/%s/lockingdb.sqlite' % self.CONFIGBASENAME
-		self.lockingdb = LockingDB(lockingdbfile)
-
-			new_file = '%s_converted_%f' % (configfile, time.time())
-			os.rename(configfile, new_file)
-			ud.debug(ud.LDAP, ud.PROCESS, "Converting done")
-
-		self.open_ucs()
-
-		for section in ['DN Mapping UCS', 'DN Mapping CON', 'UCS rejected', 'UCS deleted']:
+		for section in ['DN Mapping UCS', 'DN Mapping CON', 'UCS rejected', 'UCS deleted', 'UCS entryCSN']:
 			if not self.config.has_section(section):
 				self.config.add_section(section)
 
-		irrelevant_attributes = self.baseConfig.get('%s/ad/mapping/attributes/irrelevant' % (self.CONFIGBASENAME,), '')
+		irrelevant_attributes = self.configRegistry.get('%s/ad/mapping/attributes/irrelevant' % (self.CONFIGBASENAME,), '')
 		self.irrelevant_attributes = set(irrelevant_attributes.split(','))
 
-		ud.debug(ud.LDAP, ud.INFO, "init finished")
+	def init_ldap_connections(self):
+		self.open_ucs()
+
+	def __enter__(self):
+		return self
 
 	def __exit__(self, etype=None, exc=None, etraceback=None):
 		self.close_debug()
