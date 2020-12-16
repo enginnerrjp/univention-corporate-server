@@ -150,7 +150,7 @@ def compare_normal(val1, val2):
 
 
 def compare_lowercase(val1, val2):
-	try:  # TODO: failes if conversion to ascii-str raises exception
+	try:  # TODO: fails if conversion to ascii-str raises exception
 		if dictonary_lowercase(val1) == dictonary_lowercase(val2):
 			return True
 		else:
