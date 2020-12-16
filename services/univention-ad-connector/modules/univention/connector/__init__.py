@@ -56,7 +56,6 @@ import univention.debug as ud_c
 import univention.debug2 as ud
 
 from univention.connector.adcache import ADCache
-from univention.connector.lockingdb import LockingDB
 
 term_signal_caught = False
 
@@ -114,7 +113,7 @@ def check_ucs_lastname_user(connector, key, ucs_object):
 	'''
 	check if required values for lastname are set
 	'''
-	if 'lastname' not in ucs_object or not ucs_object['lastname']:
+	if not ucs_object.has_property('lastname') or not ucs_object['lastname']:
 		ucs_object['lastname'] = ucs_object.get('username')
 
 
