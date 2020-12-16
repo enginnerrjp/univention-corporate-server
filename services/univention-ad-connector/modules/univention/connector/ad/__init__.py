@@ -64,100 +64,24 @@ import univention.uldap
 import univention.connector
 import univention.debug2 as ud
 
-class netbiosDomainnameNotFound(Exception):
-	pass
+DECODE_IGNORELIST = ['dNSProperty', 'securityIdentifier', 'jpegPhoto', 'mSMQDigests', 'msExchMailboxSecurityDescriptor', 'userCertificate', 'logonHours', 'mSMQSites', 'objectSid', 'ipsecData', 'dnsRecord', 'mSMQSignKey', 'dSASignature', 'may', 'objectGUID', 'linkTrackSecret', 'mSMQEncryptKey', 'currentLocation', 'repsFrom', 'mS-DS-CreatorSID', 'replUpToDateVector', 'mSMQSignCertificates', 'msExchMailboxGuid', 'sIDHistory', 'msieee80211-Data', 'ms-net-ieee-8023-GP-PolicyReserved', 'ms-net-ieee-80211-GP-PolicyReserved', 'msiScript', 'productCode', 'upgradeProductCode', 'categoryId', 'ipsecData']
 
+LDAP_SERVER_SHOW_DELETED_OID = "1.2.840.113556.1.4.417"
 LDB_CONTROL_DOMAIN_SCOPE_OID = "1.2.840.113556.1.4.1339"
+LDB_CONTROL_RELAX_OID = "1.3.6.1.4.1.4203.666.5.12"
+LDB_CONTROL_PROVISION_OID = '1.3.6.1.4.1.7165.4.3.16'
+DSDB_CONTROL_REPLICATED_UPDATE_OID = '1.3.6.1.4.1.7165.4.3.3'
 
 # page results
 PAGE_SIZE = 1000
-# microsoft ldap schema binary attributes
-# -> ldbsearch --paged -H AD_SERVER -U CREDS --cross-ncs '(|(attributeSyntax=2.5.5.15)(attributeSyntax=2.5.5.10)(attributeSyntax=2.5.5.17)(attributeSyntax=2.5.5.7))' lDAPDisplayName
-BINARY_ATTRIBUTES = [
-	'addressEntryDisplayTable', 'addressEntryDisplayTableMSDOS', 'addressSyntax', 'assocNTAccount',
-	'attributeCertificateAttribute', 'attributeSecurityGUID', 'audio',
-	'auditingPolicy', 'authorityRevocationList', 'birthLocation',
-	'cACertificate', 'categoryId', 'certificateRevocationList',
-	'controlAccessRights', 'cRLPartitionedRevocationList', 'crossCertificatePair',
-	'currentLocation', 'currentValue', 'currMachineId',
-	'dBCSPwd', 'deltaRevocationList', 'dhcpClasses',
-	'dhcpOptions', 'dhcpProperties', 'dNSProperty',
-	'dnsRecord', 'domainWidePolicy', 'dSASignature',
-	'eFSPolicy', 'foreignIdentifier', 'fRSExtensions',
-	'fRSReplicaSetGUID', 'fRSRootSecurity', 'fRSVersionGUID',
-	'groupMembershipSAM', 'helpData16', 'helpData32',
-	'implementedCategories', 'invocationId', 'ipsecData',
-	'jpegPhoto', 'lDAPIPDenyList', 'linkTrackSecret',
-	'lmPwdHistory', 'logonHours', 'logonWorkstation',
-	'machineWidePolicy', 'marshalledInterface', 'may',
-	'meetingBlob', 'moniker', 'moveTreeState',
-	'msAuthz-CentralAccessPolicyID', 'msCOM-ObjectId', 'msDFS-GenerationGUIDv2',
-	'msDFS-LinkIdentityGUIDv2', 'msDFS-LinkSecurityDescriptorv2', 'msDFS-NamespaceIdentityGUIDv2',
-	'msDFSR-ContentSetGuid', 'msDFSR-Extension', 'msDFSR-ReplicationGroupGuid',
-	'msDFSR-Schedule', 'msDFS-TargetListv2', 'msDNS-DNSKEYRecords',
-	'msDNS-SigningKeyDescriptors', 'msDNS-SigningKeys', 'msDRM-IdentityCertificate',
-	'msDS-AllowedToActOnBehalfOfOtherIdentity', 'msDS-AzObjectGuid', 'msDS-BridgeHeadServersUsed',
-	'msDS-ByteArray', 'msDS-Cached-Membership', 'mS-DS-ConsistencyGuid',
-	'mS-DS-CreatorSID', 'msDS-ExecuteScriptPassword', 'msDS-GenerationId',
-	'msDS-GroupMSAMembership', 'msDS-HasInstantiatedNCs', 'msDS-ManagedPassword',
-	'msDS-ManagedPasswordId', 'msDS-ManagedPasswordPreviousId', 'msDS-OptionalFeatureGUID',
-	'msDS-QuotaTrustee', 'mS-DS-ReplicatesNCReason', 'msDS-RetiredReplNCSignatures',
-	'msDS-RevealedUsers', 'msDs-Schema-Extensions', 'msDS-Site-Affinity',
-	'msDS-TransformationRulesCompiled', 'msDS-TrustForestTrustInfo', 'msExchBlockedSendersHash',
-	'msExchDisabledArchiveGUID', 'msExchMailboxGuid', 'msExchMailboxSecurityDescriptor',
-	'msExchMasterAccountSid', 'msExchSafeRecipientsHash', 'msExchSafeSendersHash',
-	'msFVE-KeyPackage', 'msFVE-RecoveryGuid', 'msFVE-VolumeGuid',
-	'msieee80211-Data', 'msImaging-PSPIdentifier', 'msImaging-ThumbprintHash',
-	'msiScript', 'msKds-KDFParam', 'msKds-RootKeyData',
-	'msKds-SecretAgreementParam', 'mSMQDigests', 'mSMQDigestsMig',
-	'mSMQEncryptKey', 'mSMQOwnerID', 'mSMQQMID',
-	'mSMQQueueType', 'mSMQSignCertificates', 'mSMQSignCertificatesMig',
-	'mSMQSignKey', 'mSMQSiteID', 'mSMQSites',
-	'mSMQUserSid', 'ms-net-ieee-80211-GP-PolicyReserved', 'ms-net-ieee-8023-GP-PolicyReserved',
-	'msPKIAccountCredentials', 'msPKI-CredentialRoamingTokens', 'msPKIDPAPIMasterKeys',
-	'msPKIRoamingTimeStamp', 'msRTCSIP-UserRoutingGroupId', 'msSPP-ConfigLicense',
-	'msSPP-CSVLKSkuId', 'msSPP-IssuanceLicense', 'msSPP-KMSIds',
-	'msSPP-OnlineLicense', 'msSPP-PhoneLicense', 'msTAPI-ConferenceBlob',
-	'msTPM-SrkPubThumbprint', 'msWMI-TargetObject', 'netbootDUID',
-	'netbootGUID', 'nTGroupMembers', 'ntPwdHistory',
-	'nTSecurityDescriptor', 'objectGUID', 'objectSid',
-	'oMObjectClass', 'oMTGuid', 'oMTIndxGuid',
-	'originalDisplayTable', 'originalDisplayTableMSDOS', 'otherWellKnownObjects',
-	'parentCACertificateChain', 'parentGUID', 'partialAttributeDeletionList',
-	'partialAttributeSet', 'pekList', 'pendingCACertificates',
-	'perMsgDialogDisplayTable', 'perRecipDialogDisplayTable', 'photo',
-	'pKIEnrollmentAccess', 'pKIExpirationPeriod', 'pKIKeyUsage',
-	'pKIOverlapPeriod', 'pKT', 'pKTGuid',
-	'prefixMap', 'previousCACertificates', 'priorValue',
-	'privateKey', 'productCode', 'proxiedObjectName',
-	'publicKeyPolicy', 'registeredAddress', 'replicationSignature',
-	'replPropertyMetaData', 'replUpToDateVector', 'repsFrom',
-	'repsTo', 'requiredCategories', 'retiredReplDSASignatures',
-	'samDomainUpdates', 'schedule', 'schemaIDGUID',
-	'schemaInfo', 'searchGuide', 'securityIdentifier',
-	'serviceClassID', 'serviceClassInfo', 'serviceInstanceVersion',
-	'sIDHistory', 'siteGUID', 'supplementalCredentials',
-	'supportedApplicationContext', 'syncWithSID', 'teletexTerminalIdentifier',
-	'telexNumber', 'terminalServer', 'thumbnailLogo',
-	'thumbnailPhoto', 'tokenGroups', 'tokenGroupsGlobalAndUniversal',
-	'tokenGroupsNoGCAcceptable', 'trustAuthIncoming', 'trustAuthOutgoing',
-	'unicodePwd', 'unixUserPassword', 'upgradeProductCode',
-	'userCert', 'userCertificate', 'userPassword',
-	'userPKCS12', 'userSMIMECertificate', 'volTableGUID',
-	'volTableIdxGUID', 'wellKnownObjects', 'winsockAddresses',
-]
 
 
-def activate_user(connector, key, object):
-	# set userAccountControl to 544
-	for i in range(0, 10):
-		try:
-			connector.lo_ad.lo.modify_s(compatible_modstring(object['dn']), [(ldap.MOD_REPLACE, 'userAccountControl', ['544'])])
-		except ldap.NO_SUCH_OBJECT:
-			time.sleep(1)
-			continue
-		return True
-	return False
+class netbiosDomainnameNotFound(Exception):
+	pass
+
+
+class kerberosAuthenticationFailed(Exception):
+	pass
 
 
 def set_univentionObjectFlag_to_synced(connector, key, ucs_object):
