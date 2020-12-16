@@ -69,6 +69,7 @@ try:
 except AttributeError:
 	ud.debug(ud.LDAP, ud.INFO, 'univention.admin.handlers.disable_ad_restrictions is not available')
 
+
 def decode_guid(value):
 	return str(ndr_unpack(misc.GUID, value))
 
@@ -338,7 +339,7 @@ class attribute(object):
 		:ptype sync_mode: str
 	"""
 
-	def __init__(self, ucs_attribute='', ldap_attribute='', con_attribute='', con_other_attribute='', required=0, single_value=False, compare_function=None, mapping=(), reverse_attribute_check=False, sync_mode='sync', con_attribute_encoding='UTF-8'):
+	def __init__(self, ucs_attribute='', ldap_attribute='', con_attribute='', con_other_attribute='', required=0, single_value=False, compare_function='', con_value_merge_function='', mapping=(), reverse_attribute_check=False, sync_mode='sync', con_depends='', con_attribute_encoding='UTF-8'):
 		self.ucs_attribute = ucs_attribute
 		self.ldap_attribute = ldap_attribute
 		self.con_attribute = con_attribute
