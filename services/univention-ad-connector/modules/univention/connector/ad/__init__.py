@@ -162,16 +162,14 @@ def activate_user(connector, key, object):
 
 
 def set_univentionObjectFlag_to_synced(connector, key, ucs_object):
-
-	if connector.baseConfig.is_true('ad/member', False):
+	if connector.configRegistry.is_true('ad/member', False):
 		connector._object_mapping(key, ucs_object, 'ucs')
 
 		ucs_result = connector.lo.search(base=ucs_object['dn'], attr=['univentionObjectFlag'])
 
 		flags = ucs_result[0][1].get('univentionObjectFlag', [])
-		if 'synced' not in flags:
-			flags.append('synced')
-			connector.lo.lo.lo.modify_s(univention.connector.ad.compatible_modstring(ucs_object['dn']), [(ldap.MOD_REPLACE, 'univentionObjectFlag', flags)])
+		if b'synced' not in flags:
+			connector.lo.lo.lo.modify_s(ucs_object['dn'], [(ldap.MOD_ADD, 'univentionObjectFlag', b'synced')])
 
 
 def group_members_sync_from_ucs(connector, key, object):
