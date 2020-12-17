@@ -1,4 +1,4 @@
-#!/usr/bin/python2.7
+#!/usr/bin/python3
 # -*- coding: utf-8 -*-
 #
 # Univention Management Console
@@ -51,6 +51,11 @@ from univention.management.console.config import ucr
 from univention.management.console.modules.decorators import simple_response, sanitize
 from univention.management.console.modules.sanitizers import StringSanitizer, ListSanitizer, BooleanSanitizer
 
+try:
+	from typing_extensions import Dict, List, Any  # noqa F401
+except ImportError:
+	pass
+
 _ = umc.Translation('univention-management-console-module-join').translate
 
 CMD_ENABLE_EXEC = ['/usr/share/univention-updater/enable-apache2-umc', '--no-restart']
@@ -59,6 +64,7 @@ RE_HOSTNAME = re.compile('^[a-z]([a-z0-9-]*[a-z0-9])*(\.([a-z0-9]([a-z0-9-]*[a-z
 
 
 def get_master_dns_lookup():
+	# type: () -> Dict[str: unicode]
 	# DNS lookup for the Primary Directory Node entry
 	msg = None
 	fqdn = None
@@ -87,6 +93,7 @@ def get_master_dns_lookup():
 class HostSanitizer(StringSanitizer):
 
 	def _sanitize(self, value, name, further_args):
+		# type: (str, str, List[str]) -> socket
 		value = super(HostSanitizer, self)._sanitize(value, name, further_args)
 		try:
 			return socket.getfqdn(value)
@@ -101,6 +108,7 @@ class Progress(object):
 		self.reset(max_steps)
 
 	def reset(self, max_steps=100):
+		# type: (int) -> None
 		self.max_steps = max_steps
 		self.finished = False
 		self.steps = 0
@@ -110,6 +118,7 @@ class Progress(object):
 		self.critical = False
 
 	def poll(self):
+		# type: () -> Dict[str: Any]
 		return dict(
 			finished=self.finished,
 			steps=100 * float(self.steps) / self.max_steps,
@@ -120,36 +129,45 @@ class Progress(object):
 		)
 
 	def finish(self):
+		# type: () -> None
 		self.finished = True
 
 	def info_handler(self, info):
+		# type: (str) -> None
 		MODULE.process(info)
 		self.info = info
 
 	def error_handler(self, err):
+		# type: (str) -> None
 		MODULE.warn(err)
 		self.errors.append(err)
 
 	def component_handler(self, component):
+		# type: (str) -> None
 		self.component = component
 
 	def critical_handler(self, critical):
+		# type: (bool) -> None
 		self.critical = critical
 
 	def step_handler(self, steps):
+		# type: (int) -> None
 		self.steps = steps
 
 	def add_steps(self, steps=1):
+		# type: (int) -> None
 		self.steps += steps
 
 # dummy function that does nothing
 
 
 def _dummyFunc(*args):
+	# type: (List[Any]) -> None
 	pass
 
 
 def system_join(hostname, username, password, info_handler=_dummyFunc, error_handler=_dummyFunc, critical_handler=_dummyFunc, step_handler=_dummyFunc, component_handler=_dummyFunc):
+	# type: (str, str, str, function, function, function, function, function) -> bool
 	# get the number of join scripts
 	nJoinScripts = len(glob.glob('%s/*.inst' % INSTDIR))
 	stepsPerScript = 100.0 / (nJoinScripts + 1)
@@ -165,6 +183,7 @@ def system_join(hostname, username, password, info_handler=_dummyFunc, error_han
 
 
 def run_join_scripts(scripts, force, username, password, info_handler=_dummyFunc, error_handler=_dummyFunc, critical_handler=_dummyFunc, step_handler=_dummyFunc, component_handler=_dummyFunc):
+	# type: (list, bool, str, str, function, function, function, function, function) -> bool
 	with tempfile.NamedTemporaryFile() as passwordFile:
 		cmd = ['/usr/sbin/univention-run-join-scripts']
 		if username and password:
@@ -189,15 +208,16 @@ def run_join_scripts(scripts, force, username, password, info_handler=_dummyFunc
 
 
 def run(cmd, stepsPerScript, info_handler=_dummyFunc, error_handler=_dummyFunc, critical_handler=_dummyFunc, step_handler=_dummyFunc, component_handler=_dummyFunc):
+	# type: (list, float, function, function, function, function, function) -> bool
 	# disable restart of UMC server/web-server
 	MODULE.info('disabling restart of UMC server/web-server')
 	subprocess.call(CMD_DISABLE_EXEC)
 
 	try:
 		# regular expressions for output parsing
-		regError = re.compile('^\* Message:\s*(?P<message>.*)\s*$')
-		regJoinScript = re.compile('(Configure|Running)\s+(?P<script>.*)\.inst.*$')
-		regInfo = re.compile('^(?P<message>.*?)\s*:?\s*\x1b.*$')
+		regError = re.compile(r'^\* Message:\s*(?P<message>.*)\s*$')
+		regJoinScript = re.compile(r'(Configure|Running)\s+(?P<script>.*)\.inst.*$')
+		regInfo = re.compile(r'^(?P<message>.*?)\s*:?\s*\x1b.*$')
 
 		# call to univention-join
 		MODULE.info('calling "%s"' % ' '.join(cmd))
@@ -268,24 +288,27 @@ def run(cmd, stepsPerScript, info_handler=_dummyFunc, error_handler=_dummyFunc, 
 INSTDIR = '/usr/lib/univention-install'
 LOGFILE = '/var/log/univention/join.log'
 LOCKFILE = '/var/lock/univention_umc_join.lock'
-RE_JOINFILE = re.compile('^(?P<script>(?P<prio>\d\d)(?P<name>.+))\.(inst|uinst)$')
-RE_NOT_CONFIGURED = re.compile("^Warning: '([^']+)' is not configured.$")
-RE_ERROR = re.compile('^Error: (.*?)$')
+RE_JOINFILE = re.compile(r'^(?P<script>(?P<prio>\d\d)(?P<name>.+))\.(inst|uinst)$')
+RE_NOT_CONFIGURED = re.compile(r"^Warning: '([^']+)' is not configured.$")
+RE_ERROR = re.compile(r'^Error: (.*?)$')
 
 
 class Instance(Base):
 
 	def init(self):
+		# type: () -> None
 		self.progress_state = Progress()
 
 	@simple_response
 	def dpkg_locked(self):
+		# type: (None) -> bool
 		"""Do not execute join scripts when dpkg is running (e.g. via
 		App Center)
 		"""
 		return self._dpkg_locked()
 
 	def _dpkg_locked(self):
+		# type: (None) -> bool
 		fd = apt_pkg.get_lock('/var/lib/dpkg/lock')
 		if fd == -1:
 			return True
@@ -295,6 +318,7 @@ class Instance(Base):
 
 	@simple_response
 	def query(self):
+		# type: (None) -> List[str]
 		"""collects status about join scripts"""
 
 		# unjoined system?
@@ -338,37 +362,45 @@ class Instance(Base):
 
 	@simple_response
 	def joined(self):
+		# type: (None) -> bool
 		return self._joined
 
 	@simple_response
 	def progress(self):
+		# type: (None) -> Dict[str: Any]
 		return self.progress_state.poll()
 
 	@simple_response
 	def running(self):
+		# type: (None) -> bool
 		""" returns true if a join script is running. """
 		return self._running
 
 	@simple_response
 	def master(self):
+		# type: (None) -> str
 		""" returns the hostname of the Primary Directory Node as fqdn """
 		return get_master_dns_lookup()
 
 	@property
 	def _joined(self):
+		# type: (None) -> bool
 		return os.path.exists('/var/univention-join/joined')
 
 	@property
 	def _running(self):
+		# type: (None) -> bool
 		return os.path.exists(LOCKFILE)
 
 	def _lock(self):
+		# type: (None) -> None
 		try:
 			open(LOCKFILE, 'a').close()
 		except (IOError, OSError) as ex:
 			MODULE.warn('_lock: %s' % (ex))
 
 	def _unlock(self):
+		# type: (None) -> None
 		try:
 			if self._running:
 				os.unlink(LOCKFILE)
@@ -376,12 +408,14 @@ class Instance(Base):
 			MODULE.warn('_unlock: %s' % (ex))
 
 	def __del__(self):
+		# type: (None) -> None
 		self._unlock()
 
 	# TODO __finalize__?
 
 	@simple_response
 	def logview(self):
+		# type: (None) -> List[str]
 		"""Returns the last 2MB of the join.log file"""
 		with open(LOGFILE, 'rb') as fd:
 			return fd.read(2097152).decode('utf-8', 'replace')
@@ -392,6 +426,7 @@ class Instance(Base):
 		hostname=HostSanitizer(required=True, regex_pattern=RE_HOSTNAME),
 	)
 	def join(self, request):
+		# type: (Request) -> bool
 		username, password, hostname = (request.options['username'], request.options['password'], request.options['hostname'])
 
 		# Check if already a join process is running
@@ -420,6 +455,7 @@ class Instance(Base):
 			)
 
 		def _finished(thread, result):
+		# type: (Thread, Result) -> None
 			MODULE.info('Finished joining')
 			self._unlock()
 			self.progress_state.info = _('finished...')
@@ -443,6 +479,7 @@ class Instance(Base):
 		force=BooleanSanitizer(default=False)
 	)
 	def run(self, request):
+		# type: (Request) -> None
 		"""runs the given join scripts"""
 
 		# Check if already a join process is running
@@ -459,6 +496,7 @@ class Instance(Base):
 		scripts.sort(key=lambda i: int(re.match('^(\d+)', i).group()))
 
 		def _thread():
+			# type: (None) -> bool
 			# reset progress state and lock against other join processes
 			self.progress_state.reset()
 			self.progress_state.component = _('Authentication')
@@ -473,6 +511,7 @@ class Instance(Base):
 			)
 
 		def _finished(thread, result):
+			# type: (Thread, Result) -> None
 			MODULE.info('Finished running join scripts')
 			self._unlock()
 			self.progress_state.info = _('finished...')
